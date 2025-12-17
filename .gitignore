@@ -1,0 +1,59 @@
+# ===== Mac OS 系统文件 =====
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+
+# ===== VS Code =====
+.vscode/
+
+# ===== GoLand / JetBrains IDE（包括 GoLand、WebStorm 等）=====
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ===== Go 构建文件 =====
+/bin/
+/build/
+/dist/
+/out/
+*.exe
+*.test
+*.out
+
+# Go modules & vendor
+/vendor/
+/go.sum
+
+# ===== Vue / Node 项目相关（前端）=====
+node_modules/
+dist/
+*.log
+.env*
+!.env.example
+
+# ===== 临时文件 & 缓存 =====
+*.swp
+*.swo
+*.tmp
+*.bak
+*.old
+*.orig
+*.log
+
+# ===== 前后端分离：中间构建产物 =====
+/frontend/node_modules/
+/frontend/dist/
+/backend/bin/
+/backend/out/
+
+# ===== 本地配置文件（可选忽略）=====
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
