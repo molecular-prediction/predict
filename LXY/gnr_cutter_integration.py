@@ -23,7 +23,11 @@ class BenzeneHex:
     cy: float
     size: float
     atom_indices: List[int]
+
+    # 新增：存储六边形6个顶点的坐标 [(x1, y1), (x2, y2), ...]
     vertices: List[Tuple[float, float]] = None
+
+    # 辅助属性
     relative_col: int = 0
 
 
@@ -38,8 +42,10 @@ class Edge:
 # ==========================================
 
 def read_smiles_and_generate_coords(file_path: str):
+    """读取SMILES并生成2D坐标"""
     if not os.path.exists(file_path):
         print(f"[警告] 文件 {file_path} 未找到，使用内置测试分子")
+        # 使用一个足够长的 GNR 片段
         smiles = "C1=CC2=C(C=C1)C3=CC4=C(C=C3)C5=CC6=C(C=C5)C7=CC8=C(C=C7)C9=CC%10=C(C=C9)C%11=CC=C(C=C%11)C%10=C8C6=C42"
     else:
         with open(file_path, 'r') as f:
@@ -47,13 +53,12 @@ def read_smiles_and_generate_coords(file_path: str):
 
     mol = Chem.MolFromSmiles(smiles)
     if not mol: raise ValueError("SMILES 解析失败")
-    mol = Chem.AddHs(mol)
     AllChem.Compute2DCoords(mol)
-    mol = Chem.RemoveHs(mol)
     return mol
 
 
 def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
+    """RDKit 分子 -> Hex 列表 (含顶点坐标提取)"""
     ssr = Chem.GetSymmSSSR(mol)
     conf = mol.GetConformer()
     if not ssr: raise ValueError("无六元环")
@@ -62,8 +67,10 @@ def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
     for ring in ssr:
         if len(ring) != 6: continue
 
+        # 1. 获取6个原子的坐标
         atom_coords = []
-        xs, ys = [], []
+        xs = []
+        ys = []
         for idx in ring:
             pos = conf.GetAtomPosition(idx)
             atom_coords.append((pos.x, pos.y))
@@ -71,18 +78,25 @@ def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
             ys.append(pos.y)
 
         cx, cy = sum(xs) / 6.0, sum(ys) / 6.0
+
+        # 2. 关键步骤：按角度对顶点排序，确保画出来是凸六边形
+        # 使用 math.atan2(y - cy, x - cx) 计算相对于中心的角度
         atom_coords.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
 
+        # 估算大小 (取第一条边的长度作为参考)
         p1 = conf.GetAtomPosition(ring[0])
         p2 = conf.GetAtomPosition(ring[1])
         dist = math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
 
         raw_rings.append({
-            "cx": cx, "cy": cy, "size": dist,
+            "cx": cx,
+            "cy": cy,
+            "size": dist,
             "indices": list(ring),
-            "vertices": atom_coords
+            "vertices": atom_coords  # 保存排序后的顶点
         })
 
+    # --- 以下网格化逻辑保持不变 ---
     sorted_by_y = sorted(raw_rings, key=lambda x: x['cy'], reverse=True)
     rows = []
     current_row = [sorted_by_y[0]]
@@ -101,9 +115,14 @@ def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
     for r_idx, row_rings in enumerate(rows):
         row_rings.sort(key=lambda x: x['cx'])
         for c_idx, ring in enumerate(row_rings):
+            # 实例化时传入 vertices
             h = BenzeneHex(
-                id=hid, row=r_idx, col=c_idx,
-                cx=ring['cx'], cy=ring['cy'], size=ring['size'],
+                id=hid,
+                row=r_idx,
+                col=c_idx,
+                cx=ring['cx'],
+                cy=ring['cy'],
+                size=ring['size'],
                 atom_indices=ring['indices'],
                 vertices=ring['vertices']
             )
@@ -115,12 +134,15 @@ def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
 
 
 def build_edges_and_adj_geometric(hexes: List[BenzeneHex]) -> Tuple[List[Edge], Dict[int, List[int]]]:
+    """基于物理距离建立邻接表"""
     edges = []
     adj = {h.id: [] for h in hexes}
     if not hexes: return edges, adj
+
     avg_size = sum(h.size for h in hexes) / len(hexes)
     neighbor_dist_ideal = math.sqrt(3) * avg_size
     tolerance = neighbor_dist_ideal * 0.4
+
     for i in range(len(hexes)):
         for j in range(i + 1, len(hexes)):
             h1, h2 = hexes[i], hexes[j]
@@ -133,7 +155,11 @@ def build_edges_and_adj_geometric(hexes: List[BenzeneHex]) -> Tuple[List[Edge], 
 
 
 # ==========================================
-# 3. 路径搜索 (PathFinder)
+# 3. 核心升级：寻找所有路径的 PathFinder
+# ==========================================
+
+# ==========================================
+# 3. 核心升级：支持自定义横向长度的 PathFinder
 # ==========================================
 
 class EdgeCuttingPathFinder:
@@ -145,32 +171,52 @@ class EdgeCuttingPathFinder:
         self.start_time = 0
         self.time_limit = 3.0
         self.max_paths = 20
+
+        # --- 【关键参数】在此处修改 ---
+        # 允许连续横向移动的最大边数
+        # 1 = 旧模式 (走1步横的必须拐弯)
+        # 2 = 允许连续走2步横的 (涉及3个苯环)
+        # 3 = 允许连续走3步横的
+        # 这个参数比较关键 其可以被选择为1 2 3 代表横切一次最多能跨越的苯环数 现在默认选择为2 后续还需要继续优化
         self.MAX_HORIZ_RUN = 2
+        # ---------------------------
 
     def find_all_paths(self):
+        """寻找所有可能的切割路径"""
         self.start_time = time.time()
         self.found_paths = []
+
         all_rows = [h.row for h in self.hexes]
         if not all_rows: return []
         top_row, bottom_row = min(all_rows), max(all_rows)
+
         top_hexes = [h for h in self.hexes if h.row == top_row]
 
         for start_hex in sorted(top_hexes, key=lambda h: len(self.full_adj.get(h.id, []))):
             if self._should_stop(): break
-            self._dfs(start_hex.id, {start_hex.id}, [], {start_hex.row}, bottom_row, 0)
+
+            visited = {start_hex.id}
+            # 修改点：将原来的 False (布尔值) 改为 0 (计数器)
+            self._dfs(start_hex.id, visited, [], {start_hex.row}, bottom_row, current_horiz_run=0)
+
         return self.found_paths
 
     def _dfs(self, curr_id, visited, path, covered_rows, bottom_row, current_horiz_run):
         if self._should_stop(): return
+
         curr_h = self.id_to_hex[curr_id]
+
         if curr_h.row == bottom_row:
             self.found_paths.append(path.copy())
             return
 
         raw_neighbors = self.full_adj.get(curr_id, [])
         valid_neighbors = [nid for nid in raw_neighbors if nid in self.id_to_hex]
+
+        # 排序：优先尝试“非横向”的移动，这样更容易到底部
+        # 横向移动 (row不变) 排在后面
         neighbors_sorted = sorted(valid_neighbors, key=lambda n: (
-            1 if self.id_to_hex[n].row == curr_h.row else 0,
+            1 if self.id_to_hex[n].row == curr_h.row else 0,  # 横向的排后面
             self.id_to_hex[n].row,
             len(self.full_adj[n])
         ))
@@ -178,148 +224,44 @@ class EdgeCuttingPathFinder:
         for nei_id in neighbors_sorted:
             if self._should_stop(): return
             if nei_id in visited: continue
-            nei_h = self.id_to_hex[nei_id]
-            if nei_h.row < curr_h.row: continue
 
+            nei_h = self.id_to_hex[nei_id]
+            if nei_h.row < curr_h.row: continue  # 不走回头路(不往上走)
+
+            # --- 【逻辑修改核心】 ---
             is_horiz = (nei_h.row == curr_h.row)
+
             if is_horiz:
-                if current_horiz_run >= self.MAX_HORIZ_RUN: continue
+                # 如果这一步是横着走，检查是否超标
+                if current_horiz_run >= self.MAX_HORIZ_RUN:
+                    continue  # 超过最大步数，禁止走
                 new_horiz_run = current_horiz_run + 1
             else:
+                # 如果这一步是斜着/竖着走，计数器归零
                 new_horiz_run = 0
+
+            # -----------------------
 
             visited.add(nei_id)
             path.append((min(curr_id, nei_id), max(curr_id, nei_id)))
+
             self._dfs(nei_id, visited, path, covered_rows | {nei_h.row}, bottom_row, new_horiz_run)
+
             path.pop()
             visited.remove(nei_id)
 
     def _should_stop(self):
         return (time.time() - self.start_time > self.time_limit) or (len(self.found_paths) >= self.max_paths)
-
-
 # ==========================================
-# 4. SMILES 生成器 (智能滑动窗口提取法)
-# ==========================================
-
-def extract_submol_from_hexes(original_mol, hexes_subset: List[BenzeneHex]):
-    """辅助函数：根据一组 Hex 生成 RDKit 分子对象"""
-    atom_indices = set()
-    for h in hexes_subset:
-        for aid in h.atom_indices:
-            atom_indices.add(aid)
-
-    if not atom_indices: return None
-
-    rw_mol = Chem.RWMol()
-    old_to_new_map = {}
-    sorted_old_indices = sorted(list(atom_indices))
-
-    for old_idx in sorted_old_indices:
-        atom = original_mol.GetAtomWithIdx(old_idx)
-        new_idx = rw_mol.AddAtom(Chem.Atom(atom.GetSymbol()))
-        rw_mol.GetAtomWithIdx(new_idx).SetFormalCharge(atom.GetFormalCharge())
-        old_to_new_map[old_idx] = new_idx
-
-    for old_idx in sorted_old_indices:
-        orig_atom = original_mol.GetAtomWithIdx(old_idx)
-        for neighbor in orig_atom.GetNeighbors():
-            n_idx = neighbor.GetIdx()
-            if n_idx in atom_indices and n_idx > old_idx:
-                bond = original_mol.GetBondBetweenAtoms(old_idx, n_idx)
-                if bond:
-                    rw_mol.AddBond(old_to_new_map[old_idx], old_to_new_map[n_idx], bond.GetBondType())
-
-    return rw_mol
-
-
-def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
-                                     global_cutting_plan: Dict[int, List[Tuple[int, int]]],
-                                     k: int, max_col: int, filename: str):
-    """
-    智能周期性提取法：
-    1. 全局移除红线环。
-    2. 在 GNR 中间位置使用滑动窗口 (Sliding Window)，窗口宽度为 K。
-    3. 寻找一个相位 (Shift)，使得该窗口内提取出的分子是“最大连通”的。
-    这能解决单体跨越 Col 边界导致被切断的问题。
-    """
-
-    # 1. 确定全局移除的环
-    removed_hex_ids = set()
-    for path in global_cutting_plan.values():
-        for (u, v) in path:
-            removed_hex_ids.add(u)
-            removed_hex_ids.add(v)
-
-    # 2. 筛选保留的环
-    kept_hexes = [h for h in all_hexes if h.id not in removed_hex_ids]
-    if not kept_hexes:
-        print("    [失败] 所有环都被切除")
-        return
-
-    # 3. 设定滑动窗口的搜索区域 (避免边缘效应，取中间一段)
-    # 我们选择分子中间的一个周期作为基准
-    mid_col = max_col // 2
-    # 将 mid_col 对齐到 K 的倍数作为基准搜索起点
-    base_start_col = (mid_col // k) * k
-    if base_start_col < 0: base_start_col = 0
-
-    best_mol = None
-    max_atoms = 0
-
-    # 4. 尝试 K 种相位偏移 (Shift 0, 1, ..., K-1)
-    # 只要有一种偏移能“完美框住”单体（即不切断蓝色键），我们就选它
-    for shift in range(k):
-        # 窗口范围: [start, end)
-        window_start = base_start_col + shift
-        window_end = window_start + k
-
-        # 收集窗口内的保留环
-        window_hexes = [h for h in kept_hexes if window_start <= h.col < window_end]
-        if not window_hexes: continue
-
-        # 生成分子
-        mol = extract_submol_from_hexes(original_mol, window_hexes)
-        if not mol: continue
-
-        # 检查连通性
-        # 我们希望提取出的是一个完整的单体，而不是断裂的碎片
-        frags = Chem.GetMolFrags(mol.GetMol(), asMols=True, sanitizeFrags=False)
-        if not frags: continue
-
-        # 获取最大的碎片（假设单体是最大的那部分）
-        largest_frag = max(frags, key=lambda m: m.GetNumAtoms())
-
-        # 评分：优先选择原子数最多的完整碎片
-        # 逻辑是：如果窗口切坏了单体，原子数会变少（因为一部分原子被切到窗口外了）
-        # 只有当窗口完美对齐时，原子数才是最大的
-        if largest_frag.GetNumAtoms() > max_atoms:
-            max_atoms = largest_frag.GetNumAtoms()
-            best_mol = largest_frag
-
-    # 5. 保存结果
-    if best_mol:
-        try:
-            Chem.SanitizeMol(best_mol)
-            smi = Chem.MolToSmiles(best_mol)
-            with open(filename, 'w') as f:
-                f.write(smi)
-            print(f"    [SMILES] 已保存: {filename} (原子数: {max_atoms})")
-        except Exception as e:
-            print(f"    [SMILES 错误] {filename}: {e}")
-    else:
-        print(f"    [SMILES 警告] 未能提取有效单体: {filename}")
-
-
-# ==========================================
-# 5. 绘图与主流程
+# 4. 模式匹配与绘图
 # ==========================================
 
 def partition_into_tiles(hexes: List[BenzeneHex], k_cols: int) -> Dict[int, List[BenzeneHex]]:
+    """分块，并标记相对列坐标"""
     groups = {}
     for h in hexes:
         tile_index = h.col // k_cols
-        h.relative_col = h.col % k_cols
+        h.relative_col = h.col % k_cols  # 关键：标记它在块内的相对位置
         groups.setdefault(tile_index, []).append(h)
     return groups
 
@@ -328,62 +270,92 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
                             template_tile: List[BenzeneHex],
                             all_tiles: Dict[int, List[BenzeneHex]],
                             full_adj: Dict[int, List[int]]) -> Dict[int, List[Tuple[int, int]]]:
+    """
+    尝试将 template_path (在第一个块里找到的路径) 推广到所有块。
+    如果成功，返回所有块的切割边；如果失败（某块切不了），返回 None。
+    """
     id_to_hex_template = {h.id: h for h in template_tile}
+
+    # 1. 将路径转换为“相对坐标签名”
+    # 签名格式: [(u_row, u_rel_col, v_row, v_rel_col), ...]
     path_signature = []
     for (u, v) in template_path:
         h1 = id_to_hex_template[u]
         h2 = id_to_hex_template[v]
         path_signature.append((h1.row, h1.relative_col, h2.row, h2.relative_col))
 
+    # 2. 尝试在其他块中复现这个签名
     global_cutting_plan = {}
+
     for tidx, tile_hexes in all_tiles.items():
+        # 建立相对坐标索引: (row, rel_col) -> id
         coord_map = {(h.row, h.relative_col): h.id for h in tile_hexes}
+
         current_tile_path = []
         for (r1, c1, r2, c2) in path_signature:
-            if (r1, c1) not in coord_map or (r2, c2) not in coord_map: return None
+            # 检查这个块里有没有这两个对应位置的苯环
+            if (r1, c1) not in coord_map or (r2, c2) not in coord_map:
+                return None  # 结构不完整，匹配失败
+
             u_id = coord_map[(r1, c1)]
             v_id = coord_map[(r2, c2)]
-            if v_id not in full_adj.get(u_id, []): return None
+
+            # 检查这两个环在物理上是不是连着的 (在adj里)
+            # (虽然坐标对应，但可能中间缺键)
+            is_connected = False
+            if v_id in full_adj.get(u_id, []):
+                is_connected = True
+
+            if not is_connected:
+                return None  # 物理连接不存在，匹配失败
+
             current_tile_path.append((u_id, v_id))
+
         global_cutting_plan[tidx] = current_tile_path
+
     return global_cutting_plan
 
 
 def draw_multi_cut_result(all_hexes, tiles_cutting_edges, k, variant_idx, filename):
     fig, ax = plt.subplots(figsize=(12, 5))
 
-    all_removed_ids = set()
-    for path in tiles_cutting_edges.values():
-        for (u, v) in path:
-            all_removed_ids.add(u)
-            all_removed_ids.add(v)
-
+    # 1. 绘制底层的苯环 (使用 Polygon)
     for h in all_hexes:
-        fc = '#FFDDDD' if h.id in all_removed_ids else '#F0F0F0'
-        ec = 'red' if h.id in all_removed_ids else 'gray'
-        poly = Polygon(h.vertices, closed=True, facecolor=fc, edgecolor=ec, linewidth=1.0, zorder=1)
+        # 创建六边形对象
+        # closed=True 保证首尾相连
+        # facecolor: 填充色 (浅灰)
+        # edgecolor: 边框色 (深灰)
+        poly = Polygon(h.vertices, closed=True, facecolor='#F0F0F0', edgecolor='gray', linewidth=1.0, zorder=1)
         ax.add_patch(poly)
 
+        # 可选：如果你想标出环的ID，取消下面这行的注释
+        # ax.text(h.cx, h.cy, str(h.id), color='blue', fontsize=8, ha='center', va='center', zorder=2)
+
+    # 2. 绘制切割路径 (保持不变，依旧画红线连接中心)
+    # 注意：这里的红线目前是连接两个苯环中心的“逻辑连线”
     id_map = {h.id: h for h in all_hexes}
     for tile_idx, path in tiles_cutting_edges.items():
         for (u, v) in path:
             h1, h2 = id_map[u], id_map[v]
             ax.plot([h1.cx, h2.cx], [h1.cy, h2.cy], color='red', linewidth=2.5, zorder=10)
 
-    ax.set_aspect('equal')
-    ax.axis('off')
+    ax.set_aspect('equal')  # 保持纵横比，防止苯环被压扁
+    ax.axis('off')  # 关闭坐标轴
     ax.set_title(f"Cut Method K={k} | Variant {variant_idx}", fontsize=14)
     plt.tight_layout()
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.savefig(filename, dpi=300, bbox_inches='tight')  # bbox_inches='tight' 减少白边
     plt.close()
+    print(f"[输出] 已保存: {filename}")
 
+
+# ==========================================
+# 主程序
+# ==========================================
 
 if __name__ == "__main__":
     input_file = "smile/gnr_7ac_segment.smi"
-    photo_dir = "photo"
-    smile_dir = "predict_smile"
-    os.makedirs(photo_dir, exist_ok=True)
-    os.makedirs(smile_dir, exist_ok=True)
+    save_dir = "photo"
+    os.makedirs(save_dir, exist_ok=True)
 
     max_k_attempts = 5
 
@@ -398,24 +370,36 @@ if __name__ == "__main__":
         exit()
 
     print(f">>> 步骤2: 开始尝试多种切割方案 (K=1 ~ {max_k_attempts})...")
+
     found_any_global = False
 
     for k in range(1, max_k_attempts + 1):
         if k > total_width: continue
 
+        # A. 分块
         tiles = partition_into_tiles(hexes, k_cols=k)
-        if not tiles or not tiles.get(0): continue
-        template_tile = tiles.get(0)
+        if not tiles: continue
 
+        # B. 选取第一个块作为“模板” (Template Tile)
+        # 假设第一个块(Index 0)是完整的，我们就在它上面找所有切法
+        template_tile = tiles.get(0)
+        if not template_tile: continue  # 没找到第0块
+
+        # 只有当这块Tile有“厚度”时才切
         if len({h.row for h in template_tile}) <= 1: continue
 
+        # C. 在模板块上寻找【所有】可能的路径
+        # 这里传入局部的 id_to_hex (template_tile)，防止跑出去
         template_finder = EdgeCuttingPathFinder(template_tile, all_adj)
         all_possible_paths = template_finder.find_all_paths()
 
-        if not all_possible_paths: continue
+        if not all_possible_paths:
+            # print(f"    K={k} 模板块未找到路径")
+            continue
 
-        print(f"    K={k}: 模板找到 {len(all_possible_paths)} 种路径，正在处理...")
+        print(f"    K={k}: 在模板块中找到了 {len(all_possible_paths)} 种潜在切法，正在验证全局匹配...")
 
+        # D. 验证每一种切法是否能应用到其他所有块
         variant_count = 0
         for path in all_possible_paths:
             global_plan = apply_path_to_all_tiles(path, template_tile, tiles, all_adj)
@@ -423,19 +407,17 @@ if __name__ == "__main__":
             if global_plan:
                 variant_count += 1
                 found_any_global = True
+                out_name = os.path.join(save_dir, f"cut_method_k{k}_v{variant_count}.png")
+                draw_multi_cut_result(hexes, global_plan, k, variant_count, out_name)
 
-                base_name = f"cut_method_k{k}_v{variant_count}"
-                img_path = os.path.join(photo_dir, base_name + ".png")
-                draw_multi_cut_result(hexes, global_plan, k, variant_count, img_path)
+                # 限制每个K值最多输出前5种变体，避免图片太多
+                if variant_count >= 5:
+                    break
 
-                # --- 核心修改 ---
-                smi_path = os.path.join(smile_dir, base_name + ".smi")
-                # 传入 total_width 用于定位中间区域
-                generate_monomer_smiles_periodic(mol, hexes, global_plan, k, total_width, smi_path)
-
-                if variant_count >= 5: break
+        if variant_count == 0:
+            print(f"    K={k} 方案不可行 (无法全局匹配)")
 
     if not found_any_global:
         print("\n未找到任何有效的切割方案。")
     else:
-        print(f"\n全部完成！\n图片路径: {photo_dir}\nSMILES路径: {smile_dir}")
+        print(f"\n全部完成！图片已保存在 {save_dir} 文件夹。")
