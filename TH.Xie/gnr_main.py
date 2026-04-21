@@ -1,29 +1,33 @@
 import os
-import shutil  # [新增] 用于删除文件夹
+import shutil
 from gnr_graph import read_smiles_and_generate_coords, mol_to_hex_grid, build_edges_and_adj_geometric, partition_into_tiles, apply_path_to_all_tiles
 from gnr_pathfinder import EdgeCuttingPathFinder
 from gnr_smiles import generate_monomer_smiles_periodic
 from gnr_visualizer import draw_multi_cut_result
 
 def clean_pycache():
-    """清理当前目录及子目录下的 __pycache__"""
-    print(">>> 正在清理 __pycache__ ...")
     for root, dirs, files in os.walk("."):
         for d in dirs:
             if d == "__pycache__":
                 path = os.path.join(root, d)
                 try:
                     shutil.rmtree(path)
-                    print(f"    已删除: {path}")
-                except Exception as e:
-                    print(f"    删除失败 {path}: {e}")
+                except Exception:
+                    pass
 
 def main():
     input_file = "smile/gnr_7ac_segment.smi"
-    photo_dir = "photo"
-    smile_dir = "predict_smile"
+    
+    # 建立分类明确的输出文件夹
+    photo_dir = "photo"                          # 切割方案网格图
+    smile_raw_dir = "predict_smile_raw"          # [原] 不加任何封端的纯骨架 SMILES
+    smile_capped_dir = "predict_smile_capped"    # [新] 自动添加 -CH3 和 -Br 的 SMILES
+    monomer_img_dir = "monomer_imgs"             # 封端后的 RDKit 标准化学结构图
+    
     os.makedirs(photo_dir, exist_ok=True)
-    os.makedirs(smile_dir, exist_ok=True)
+    os.makedirs(smile_raw_dir, exist_ok=True)
+    os.makedirs(smile_capped_dir, exist_ok=True)
+    os.makedirs(monomer_img_dir, exist_ok=True)
 
     max_k_attempts = 5
 
@@ -35,7 +39,7 @@ def main():
         print(f"    分子总宽: {total_width} 列, 苯环数: {len(hexes)}")
     except Exception as e:
         print(f"出错: {e}")
-        clean_pycache() # 出错也要清理
+        clean_pycache()
         exit()
 
     print(f">>> 步骤2: 开始尝试多种切割方案 (K=1 ~ {max_k_attempts})...")
@@ -50,7 +54,6 @@ def main():
 
         if len({h.row for h in template_tile}) <= 1: continue
 
-        # [修改] 传入 k 参数，以便 pathfinder 处理周期性边界
         template_finder = EdgeCuttingPathFinder(template_tile, all_adj, k_cols=k)
         all_possible_paths = template_finder.find_all_paths()
 
@@ -67,20 +70,27 @@ def main():
                 found_any_global = True
 
                 base_name = f"cut_method_k{k}_v{variant_count}"
+                
                 img_path = os.path.join(photo_dir, base_name + ".png")
+                raw_smi_path = os.path.join(smile_raw_dir, base_name + "_raw.smi")
+                capped_smi_path = os.path.join(smile_capped_dir, base_name + "_capped.smi")
+                monomer_img_path = os.path.join(monomer_img_dir, base_name + "_monomer.png")
+
                 draw_multi_cut_result(hexes, global_plan, k, variant_count, img_path)
 
-                smi_path = os.path.join(smile_dir, base_name + ".smi")
-                generate_monomer_smiles_periodic(mol, hexes, global_plan, k, total_width, smi_path)
+                # 将三个文件路径都传给处理函数
+                generate_monomer_smiles_periodic(
+                    mol, hexes, global_plan, k, total_width,
+                    raw_smi_path, capped_smi_path, monomer_img_path
+                )
 
                 if variant_count >= 5: break
 
     if not found_any_global:
         print("\n未找到任何有效的切割方案。")
     else:
-        print(f"\n全部完成！\n图片路径: {photo_dir}\nSMILES路径: {smile_dir}")
+        print(f"\n全部完成！请检查输出文件夹。")
     
-    # [新增] 程序结束前清理
     clean_pycache()
 
 if __name__ == "__main__":
