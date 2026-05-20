@@ -3,6 +3,7 @@ from typing import List, Dict, Tuple
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 from gnr_types import BenzeneHex
+import math
 
 def extract_submol_from_hexes(original_mol, hexes_subset: List[BenzeneHex]):
     """提取原始未封端分子骨架"""
@@ -84,47 +85,79 @@ def extract_all_capped_monomers(original_mol, window_hexes: List[BenzeneHex], al
 
     if not broken_bonds: return []
 
-    # 2. 将断键分为左右两侧，并严格按 Y 坐标排序 (0为Top，-1为Bottom)
-    cx = sum(conf.GetAtomPosition(idx).x for idx in broken_bonds) / len(broken_bonds)
-    left_bonds = sorted([u for u in broken_bonds if conf.GetAtomPosition(u).x < cx],
-                        key=lambda u: conf.GetAtomPosition(u).y, reverse=True)
-    right_bonds = sorted([u for u in broken_bonds if conf.GetAtomPosition(u).x >= cx],
-                         key=lambda u: conf.GetAtomPosition(u).y, reverse=True)
+    # 2. 将断键分为左右两侧，并建立局部相对坐标系 (抵抗全局分子倾斜)
+    if len(window_hexes) == 2:
+        h1, h2 = window_hexes[0], window_hexes[1]
+        # 确保 h1 在左，h2 在右
+        if h1.col > h2.col or (h1.col == h2.col and h1.cx > h2.cx):
+            h1, h2 = h2, h1
 
-    # 3. 严格分配逻辑：强制 1,5-二溴 (对角 Alpha 键)，甲基在剩余边缘二选一
+        # 建立局部坐标系
+        vec_x = (h2.cx - h1.cx, h2.cy - h1.cy)
+        length_x = math.hypot(vec_x[0], vec_x[1]) if math.hypot(vec_x[0], vec_x[1]) > 0 else 1.0
+        ux = (vec_x[0] / length_x, vec_x[1] / length_x)
+        uy = (-ux[1], ux[0])  # 局部 Y 轴 (指向上)
+
+        mcx = (h1.cx + h2.cx) / 2
+        mcy = (h1.cy + h2.cy) / 2
+
+        def get_local_y(u):
+            pos = conf.GetAtomPosition(u)
+            return (pos.x - mcx) * uy[0] + (pos.y - mcy) * uy[1]
+
+        left_bonds = [u for u in broken_bonds if u in h1.atom_indices and u not in h2.atom_indices]
+        right_bonds = [u for u in broken_bonds if u in h2.atom_indices and u not in h1.atom_indices]
+        bridgeheads = set(h1.atom_indices).intersection(set(h2.atom_indices))
+    else:
+        # 保底逻辑 (处理非 K=2 的情况)
+        bridgeheads = set(aid for aid in sorted_old_indices if sum(
+            1 for n in original_mol.GetAtomWithIdx(aid).GetNeighbors() if n.GetIdx() in monomer_atom_indices) >= 3)
+        cx = sum(conf.GetAtomPosition(idx).x for idx in broken_bonds) / len(broken_bonds)
+        left_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x < cx]
+        right_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x >= cx]
+
+        def get_local_y(u):
+            return conf.GetAtomPosition(u).y
+
+    # 3. 严格拓扑分类：Alpha连着桥头碳，Beta不连
+    def categorize_and_sort(bonds):
+        alphas, betas = [], []
+        for u in bonds:
+            if any(n.GetIdx() in bridgeheads for n in original_mol.GetAtomWithIdx(u).GetNeighbors()):
+                alphas.append(u)
+            else:
+                betas.append(u)
+        # 统一按局部 Y 轴从上到下排序
+        alphas.sort(key=get_local_y, reverse=True)
+        betas.sort(key=get_local_y, reverse=True)
+        return alphas, betas
+
+    left_alphas, left_betas = categorize_and_sort(left_bonds)
+    right_alphas, right_betas = categorize_and_sort(right_bonds)
+
     left_choices = []
-    if len(left_bonds) >= 3:
-        # 左侧的 5 位 (Bottom-Left) 固定为 Br
-        br_bond_left = left_bonds[-1]
-        left_choices = [
-            {br_bond_left: 'Br', left_bonds[0]: 'C'}, # 甲基在 8 位 (Top-Left)
-            {br_bond_left: 'Br', left_bonds[1]: 'C'}  # 甲基在 6 位 (Middle-Left)
-        ]
-    elif len(left_bonds) == 2:
-        left_choices = [
-            {left_bonds[1]: 'Br', left_bonds[0]: 'C'},
-            {left_bonds[0]: 'Br', left_bonds[1]: 'C'}
-        ]
-    elif len(left_bonds) == 1:
-        left_choices = [{left_bonds[0]: 'Br'}]
+    if len(left_alphas) >= 1:
+        br_bond_left = left_alphas[-1]  # Bottom-Alpha (5)
+        choices = []
+        if len(left_alphas) >= 2:
+            choices.append({br_bond_left: 'Br', left_alphas[0]: 'C'})  # Top-Alpha (8)
+        if len(left_betas) >= 2:
+            choices.append({br_bond_left: 'Br', left_betas[-1]: 'C'})  # Bottom-Beta (6)
+        elif len(left_betas) == 1:
+            choices.append({br_bond_left: 'Br', left_betas[0]: 'C'})
+        left_choices = choices if choices else [{br_bond_left: 'Br'}]
     else:
         left_choices = [{}]
 
     right_choices = []
-    if len(right_bonds) >= 3:
-        # 右侧的 1 位 (Top-Right) 固定为 Br
-        br_bond_right = right_bonds[0]
-        right_choices = [
-            {br_bond_right: 'Br', right_bonds[-1]: 'C'}, # 甲基在 4 位 (Bottom-Right)
-            {br_bond_right: 'Br', right_bonds[1]: 'C'}   # 甲基在 2 位 (Middle-Right)
-        ]
-    elif len(right_bonds) == 2:
-        right_choices = [
-            {right_bonds[0]: 'Br', right_bonds[1]: 'C'},
-            {right_bonds[1]: 'Br', right_bonds[0]: 'C'}
-        ]
-    elif len(right_bonds) == 1:
-        right_choices = [{right_bonds[0]: 'Br'}]
+    if len(right_alphas) >= 1:
+        br_bond_right = right_alphas[0]  # Top-Alpha (1)
+        choices = []
+        if len(right_alphas) >= 2:
+            choices.append({br_bond_right: 'Br', right_alphas[-1]: 'C'})  # Bottom-Alpha (4)
+        if len(right_betas) >= 1:
+            choices.append({br_bond_right: 'Br', right_betas[0]: 'C'})  # Top-Beta (2)
+        right_choices = choices if choices else [{br_bond_right: 'Br'}]
     else:
         right_choices = [{}]
 
@@ -191,7 +224,6 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
 
     unique_raw_smiles = set()
     raw_results = []
-    unique_capped_smiles = set()
     capped_results = []
 
     for window_hexes in valid_windows:
@@ -208,17 +240,15 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
                         raw_results.append(best_raw_mol)
                 except: pass
 
-        capped_mols = extract_all_capped_monomers(original_mol, window_hexes, all_hexes, removed_hex_ids)
+    if valid_windows:
+        target_window = valid_windows[0]
+        capped_mols = extract_all_capped_monomers(original_mol, target_window, all_hexes, removed_hex_ids)
         for capped_mol in capped_mols:
             frags = Chem.GetMolFrags(capped_mol, asMols=True, sanitizeFrags=True)
             if frags:
                 best_capped_mol = max(frags, key=lambda m: m.GetNumAtoms())
-                try:
-                    smi = Chem.MolToSmiles(best_capped_mol)
-                    if smi not in unique_capped_smiles:
-                        unique_capped_smiles.add(smi)
-                        capped_results.append(best_capped_mol)
-                except: pass
+                # 直接添加，不进行 SMILES 字符串去重
+                capped_results.append(best_capped_mol)
 
     # 保存文件
     for idx, mol in enumerate(raw_results):
