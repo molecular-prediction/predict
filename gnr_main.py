@@ -1,4 +1,13 @@
+import logging
+import os
+
 from gnr_service import clean_pycache, run_pipeline
+
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 def main():
     input_file = "smile/gnr_7ac_segment.smi"

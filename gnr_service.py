@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -13,9 +14,12 @@ from gnr_graph import (
     read_smiles_and_generate_coords,
 )
 from gnr_pathfinder import EdgeCuttingPathFinder
+from llm_provider import OpenAILLMProvider, SmileJudgement
 from gnr_smiles import generate_monomer_smiles_periodic
 from gnr_visualizer import draw_multi_cut_result
 
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 SMILE_DIR = BASE_DIR / "smile"
@@ -38,6 +42,7 @@ class OutputArtifact:
     capped_smiles: List[str]
     capped_smile_files: List[str]
     monomer_images: List[str]
+    smile_judgements: List[SmileJudgement]
 
 
 @dataclass
@@ -121,6 +126,7 @@ def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
                 capped_smiles=[],
                 capped_smile_files=[],
                 monomer_images=[],
+                smile_judgements=[],
             )
         return artifact_map[base_name]
 
@@ -166,12 +172,99 @@ def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
         artifact = get_artifact(base_name, int(k_str), int(variant_str))
         artifact.monomer_images.append(str(path))
 
+    for artifact in artifact_map.values():
+        artifact.raw_smile_files.sort()
+        artifact.capped_smile_files.sort()
+        artifact.monomer_images.sort()
+
     return sorted(artifact_map.values(), key=lambda item: (item.k, item.variant, item.base_name))
 
 
-def run_pipeline(input_file: str, max_k_attempts: int = 5) -> PredictionRun:
+def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAILLMProvider]) -> None:
+    for artifact in artifacts:
+        logger.info(
+            "Start judging artifact: base_name=%s k=%s variant=%s capped_count=%s",
+            artifact.base_name,
+            artifact.k,
+            artifact.variant,
+            len(artifact.capped_smile_files),
+        )
+        judgements: List[SmileJudgement] = []
+        for index, smile_file in enumerate(artifact.capped_smile_files, start=1):
+            smile = _read_smiles_from_file(Path(smile_file))
+            if not smile:
+                logger.warning(
+                    "Skip empty SMILES file: artifact=%s file=%s",
+                    artifact.base_name,
+                    smile_file,
+                )
+                continue
+            if provider is None:
+                logger.warning(
+                    "LLM provider unavailable, skipping judgement: artifact=%s index=%s smiles=%s",
+                    artifact.base_name,
+                    index,
+                    smile,
+                )
+                judgements.append(
+                    SmileJudgement(
+                        smile=smile,
+                        judgment="未配置 LLM_API_KEY，跳过评判。",
+                        model="",
+                        status="disabled",
+                        error="OpenAI provider unavailable",
+                    )
+                )
+                continue
+            try:
+                logger.info(
+                    "Judging SMILES: artifact=%s index=%s smiles=%s",
+                    artifact.base_name,
+                    index,
+                    smile,
+                )
+                result = provider.judge_smiles(smile)
+                logger.info(
+                    "Judgement done: artifact=%s index=%s model=%s status=%s",
+                    artifact.base_name,
+                    index,
+                    result.model,
+                    result.status,
+                )
+                judgements.append(result)
+            except Exception as exc:
+                logger.exception(
+                    "Judgement failed: artifact=%s index=%s smiles=%s",
+                    artifact.base_name,
+                    index,
+                    smile,
+                )
+                judgements.append(
+                    SmileJudgement(
+                        smile=smile,
+                        judgment="",
+                        model=provider.model,
+                        status="error",
+                        error=str(exc),
+                    )
+                )
+        artifact.smile_judgements = judgements
+        logger.info(
+            "Finished judging artifact: base_name=%s success_count=%s",
+            artifact.base_name,
+            sum(1 for item in judgements if item.status == "ok"),
+        )
+
+
+def run_pipeline(
+    input_file: str,
+    max_k_attempts: int = 5,
+    llm_provider: Optional[OpenAILLMProvider] = None,
+) -> PredictionRun:
     ensure_output_dirs()
     start_ts = time.time()
+    provider = llm_provider if llm_provider is not None else OpenAILLMProvider.from_env()
+    logger.info("Pipeline started: input_file=%s provider=%s", input_file, type(provider).__name__ if provider else "None")
 
     mol = read_smiles_and_generate_coords(input_file)
     hexes, total_width = mol_to_hex_grid(mol)
@@ -227,7 +320,15 @@ def run_pipeline(input_file: str, max_k_attempts: int = 5) -> PredictionRun:
                 break
 
     artifacts = _collect_outputs_since(start_ts)
+    _judge_artifacts(artifacts, provider)
     message = "全部完成" if found_any_global else "未找到任何有效的切割方案"
+    logger.info(
+        "Pipeline finished: input_file=%s found_any_global=%s artifact_count=%s message=%s",
+        input_file,
+        found_any_global,
+        len(artifacts),
+        message,
+    )
 
     return PredictionRun(
         input_file=str(Path(input_file).resolve()),

@@ -209,6 +209,37 @@ button {
   font-size: 13px;
 }
 
+.judge {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.judge:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.judge-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.judge-text {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.judge-error {
+  color: #b42318;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .thumbs {
   display: grid;
   gap: 10px;

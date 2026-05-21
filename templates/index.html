@@ -90,6 +90,29 @@
                 {% endif %}
               </div>
 
+              <div class="block">
+                <h3>OpenAI 评判</h3>
+                {% if item.smile_judgements %}
+                  {% for judgement in item.smile_judgements %}
+                    <div class="judge">
+                      <div class="mono">{{ judgement.smile }}</div>
+                      <div class="judge-meta">
+                        <span>model: {{ judgement.model or '未配置' }}</span>
+                        <span>status: {{ judgement.status }}</span>
+                      </div>
+                      {% if judgement.judgment %}
+                        <div class="judge-text">{{ judgement.judgment }}</div>
+                      {% endif %}
+                      {% if judgement.error %}
+                        <div class="judge-error">{{ judgement.error }}</div>
+                      {% endif %}
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <div class="empty">暂无</div>
+                {% endif %}
+              </div>
+
               <div class="thumbs">
                 {% for img in item.monomer_images %}
                   <a href="{{ img }}" target="_blank" rel="noreferrer">

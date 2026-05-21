@@ -1,3 +1,5 @@
+import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +21,11 @@ from gnr_service import (
     run_pipeline,
     save_input_smile_file,
     save_uploaded_smile_file,
+)
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
 app = FastAPI(title="TH.Xie GNR Web")
@@ -52,6 +59,16 @@ def _artifact_to_view(item):
         "capped_smiles": item.capped_smiles,
         "capped_smile_files": [_to_web_url(p) for p in item.capped_smile_files],
         "monomer_images": [_to_web_url(p) for p in item.monomer_images],
+        "smile_judgements": [
+            {
+                "smile": judgement.smile,
+                "judgment": judgement.judgment,
+                "model": judgement.model,
+                "status": judgement.status,
+                "error": judgement.error,
+            }
+            for judgement in item.smile_judgements
+        ],
     }
 
 
