@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TH.Xie GNR Web</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">TH.Xie · GNR Pipeline</p>
+        <h1>smile 文件上传 / 直接输入 smile 码</h1>
+        <p class="lead">上传后会保存到项目内 `smile/` 目录，再调用原有算法生成切割图、原始骨架 smile、封端 smile 和图片。</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <form class="form" action="/run" method="post" enctype="multipart/form-data">
+        <label class="field">
+          <span>上传 smile 文件</span>
+          <input type="file" name="smile_file" accept=".smi,.smiles,.txt,text/plain" />
+        </label>
+
+        <div class="divider">或者</div>
+
+        <label class="field">
+          <span>直接输入 smile 码</span>
+          <textarea name="smile_text" rows="6" placeholder="在这里粘贴 smile 码"></textarea>
+        </label>
+
+        <button type="submit">开始处理</button>
+      </form>
+    </section>
+
+    {% if error %}
+      <section class="panel error">{{ error }}</section>
+    {% endif %}
+
+    {% if saved_input %}
+      <section class="panel meta">
+        <div><strong>输入文件：</strong>{{ saved_input }}</div>
+        {% if input_smiles %}
+          <div class="mono"><strong>输入 smile：</strong>{{ input_smiles }}</div>
+        {% endif %}
+      </section>
+    {% endif %}
+
+    {% if result %}
+      <section class="panel meta">
+        <div><strong>状态：</strong>{{ result.message }}</div>
+        <div><strong>苯环数：</strong>{{ result.hex_count }} <strong>总宽度：</strong>{{ result.total_width }}</div>
+      </section>
+
+      {% if artifacts_view %}
+        <section class="grid">
+          {% for item in artifacts_view %}
+            <article class="card">
+              <div class="card-head">
+                <h2>K={{ item.k }} · Variant {{ item.variant }}</h2>
+                <code>{{ item.base_name }}</code>
+              </div>
+
+              {% if item.cut_image %}
+                <a class="image-link" href="{{ item.cut_image }}" target="_blank" rel="noreferrer">
+                  <img src="{{ item.cut_image }}" alt="cut image">
+                </a>
+              {% endif %}
+
+              <div class="block">
+                <h3>Raw SMILES</h3>
+                {% if item.raw_smiles %}
+                  {% for smi in item.raw_smiles %}
+                    <div class="mono">{{ smi }}</div>
+                  {% endfor %}
+                {% else %}
+                  <div class="empty">暂无</div>
+                {% endif %}
+              </div>
+
+              <div class="block">
+                <h3>Capped SMILES</h3>
+                {% if item.capped_smiles %}
+                  {% for smi in item.capped_smiles %}
+                    <div class="mono">{{ smi }}</div>
+                  {% endfor %}
+                {% else %}
+                  <div class="empty">暂无</div>
+                {% endif %}
+              </div>
+
+              <div class="thumbs">
+                {% for img in item.monomer_images %}
+                  <a href="{{ img }}" target="_blank" rel="noreferrer">
+                    <img src="{{ img }}" alt="monomer">
+                  </a>
+                {% endfor %}
+              </div>
+            </article>
+          {% endfor %}
+        </section>
+      {% endif %}
+    {% endif %}
+  </main>
+</body>
+</html>
