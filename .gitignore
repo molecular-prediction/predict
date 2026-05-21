@@ -16,7 +16,11 @@ Icon?
 *.iml
 *.ipr
 *.iws
-
+/photo/
+/predict_smile_capped/
+/predict_smile_raw/
+/ppt/
+/__pycache__/
 # ===== Go 构建文件 =====
 /bin/
 /build/
