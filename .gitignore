@@ -17,6 +17,7 @@ Icon?
 *.ipr
 *.iws
 /photo/
+/monomer_imgs/
 /predict_smile_capped/
 /predict_smile_raw/
 /ppt/

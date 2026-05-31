@@ -277,10 +277,13 @@ def run_pipeline(
             continue
 
         tiles = partition_into_tiles(hexes, k_cols=k)
-        if not tiles or not tiles.get(0):
+        if not tiles:
             continue
 
-        template_tile = tiles.get(0)
+        # 动态寻找具有最完整高度（跨越行数最多）的图块作为模板，而不是死板地取 Tile 0
+        best_tidx = max(tiles.keys(), key=lambda t: len({h.row for h in tiles[t]}))
+        template_tile = tiles[best_tidx]
+
         if len({h.row for h in template_tile}) <= 1:
             continue
 
