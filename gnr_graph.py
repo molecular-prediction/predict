@@ -17,7 +17,8 @@ def read_smiles_and_generate_coords(file_path: str):
     if not mol: raise ValueError("SMILES 解析失败")
     mol = Chem.AddHs(mol)
     AllChem.Compute2DCoords(mol)
-    mol = Chem.RemoveHs(mol)
+    # 加上 sanitize=False 避免大分子去氢时进行 Kekulize 验证
+    mol = Chem.RemoveHs(mol, sanitize=False)
     return mol
 
 
