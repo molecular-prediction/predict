@@ -1,4 +1,5 @@
 import os
+import math
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 from rdkit import Chem
@@ -147,65 +148,158 @@ def extract_all_capped_monomers(
                     base_rw_mol.AddBond(old_to_new_map[old_idx], old_to_new_map[n_idx], bond.GetBondType())
 
     conf = original_mol.GetConformer()
-    candidate_sites = []
+    broken_bonds = []
     for old_idx in sorted_old_indices:
-        atom = original_mol.GetAtomWithIdx(old_idx)
-        if atom.GetSymbol() != "C" or not atom.GetIsAromatic():
-            continue
-        # A degree-2 aromatic carbon is a peripheral C-H site in the source PAH.
-        # These are valid aryl bromide precursor positions; degree-3 fused atoms are not.
-        if atom.GetDegree() == 2:
-            pos = conf.GetAtomPosition(old_idx)
-            candidate_sites.append((old_idx, pos.x, pos.y))
+        orig_atom = original_mol.GetAtomWithIdx(old_idx)
+        for neighbor in orig_atom.GetNeighbors():
+            if neighbor.GetIdx() not in monomer_atom_indices:
+                broken_bonds.append(old_idx)
+                break
 
-    if len(candidate_sites) < 2:
+    if not broken_bonds:
         return []
 
-    min_x = min(item[1] for item in candidate_sites)
-    max_x = max(item[1] for item in candidate_sites)
-    x_span = max(max_x - min_x, 1e-6)
-    edge_width = max(0.20 * x_span, 1e-6)
-    left_sites = [item for item in candidate_sites if item[1] <= min_x + edge_width]
-    right_sites = [item for item in candidate_sites if item[1] >= max_x - edge_width]
+    if len(window_hexes) == 2:
+        h1, h2 = window_hexes[0], window_hexes[1]
+        if h1.col > h2.col or (h1.col == h2.col and h1.cx > h2.cx):
+            h1, h2 = h2, h1
 
-    br_pairs = []
-    if left_sites and right_sites:
-        for left in left_sites:
-            best_right = min(
-                right_sites,
-                key=lambda right: (abs(right[2] - left[2]), -abs(right[1] - left[1])),
-            )
-            br_pairs.append((left[0], best_right[0]))
-        for right in right_sites:
-            best_left = min(
-                left_sites,
-                key=lambda left: (abs(left[2] - right[2]), -abs(right[1] - left[1])),
-            )
-            br_pairs.append((best_left[0], right[0]))
-    else:
-        for i, first in enumerate(candidate_sites):
-            for second in candidate_sites[i + 1:]:
-                br_pairs.append((first[0], second[0]))
+        bridgeheads = set(h1.atom_indices).intersection(set(h2.atom_indices))
+        if len(bridgeheads) != 2:
+            return []
 
-    def pair_score(pair):
-        p1 = conf.GetAtomPosition(pair[0])
-        p2 = conf.GetAtomPosition(pair[1])
-        return (-abs(p1.x - p2.x), abs(p1.y - p2.y), p1.x + p2.x)
+        vec_x = (h2.cx - h1.cx, h2.cy - h1.cy)
+        length_x = math.hypot(vec_x[0], vec_x[1]) or 1.0
+        ux = (vec_x[0] / length_x, vec_x[1] / length_x)
+        uy = (-ux[1], ux[0])
+        mcx = (h1.cx + h2.cx) / 2
+        mcy = (h1.cy + h2.cy) / 2
 
-    br_pairs = sorted(set(tuple(sorted(pair)) for pair in br_pairs), key=pair_score)[:4]
+        def get_local_y(u):
+            pos = conf.GetAtomPosition(u)
+            return (pos.x - mcx) * uy[0] + (pos.y - mcy) * uy[1]
+
+        left_bonds = [u for u in broken_bonds if u in h1.atom_indices and u not in h2.atom_indices]
+        right_bonds = [u for u in broken_bonds if u in h2.atom_indices and u not in h1.atom_indices]
+
+        def categorize_and_sort(bonds):
+            alphas, betas = [], []
+            for u in bonds:
+                if any(n.GetIdx() in bridgeheads for n in original_mol.GetAtomWithIdx(u).GetNeighbors()):
+                    alphas.append(u)
+                else:
+                    betas.append(u)
+            alphas.sort(key=get_local_y, reverse=True)
+            betas.sort(key=get_local_y, reverse=True)
+            return alphas, betas
+
+        left_alphas, left_betas = categorize_and_sort(left_bonds)
+        right_alphas, right_betas = categorize_and_sort(right_bonds)
+
+        left_choices = []
+        if left_alphas:
+            br_bond_left = left_alphas[-1]
+            if len(left_alphas) >= 2:
+                left_choices.append({br_bond_left: "Br", left_alphas[0]: "C"})
+            if len(left_betas) >= 2:
+                left_choices.append({br_bond_left: "Br", left_betas[-1]: "C"})
+            elif len(left_betas) == 1:
+                left_choices.append({br_bond_left: "Br", left_betas[0]: "C"})
+            if not left_choices:
+                left_choices.append({br_bond_left: "Br"})
+        else:
+            left_choices = [{}]
+
+        right_choices = []
+        if right_alphas:
+            br_bond_right = right_alphas[0]
+            if len(right_alphas) >= 2:
+                right_choices.append({br_bond_right: "Br", right_alphas[-1]: "C"})
+            if right_betas:
+                right_choices.append({br_bond_right: "Br", right_betas[0]: "C"})
+            if not right_choices:
+                right_choices.append({br_bond_right: "Br"})
+        else:
+            right_choices = [{}]
+
+        capped_mols = []
+        for left_choice in left_choices:
+            for right_choice in right_choices:
+                rw_mol = Chem.RWMol(base_rw_mol)
+                assignments = {}
+                assignments.update(left_choice)
+                assignments.update(right_choice)
+                for atom_idx, cap_type in assignments.items():
+                    cap = rw_mol.AddAtom(Chem.Atom(cap_type))
+                    rw_mol.AddBond(old_to_new_map[atom_idx], cap, Chem.BondType.SINGLE)
+                try:
+                    Chem.SanitizeMol(rw_mol)
+                    capped_mols.append(rw_mol.GetMol())
+                except Exception:
+                    pass
+        return capped_mols
+
+    bridgeheads = set(aid for aid in sorted_old_indices if sum(
+        1 for n in original_mol.GetAtomWithIdx(aid).GetNeighbors()
+        if n.GetIdx() in monomer_atom_indices
+    ) >= 3)
+    cx = sum(conf.GetAtomPosition(idx).x for idx in broken_bonds) / len(broken_bonds)
+    left_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x < cx]
+    right_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x >= cx]
+
+    def get_local_y(u):
+        return conf.GetAtomPosition(u).y
+
+    local_x_values = [conf.GetAtomPosition(u).x for u in monomer_atom_indices]
+    local_y_values = [get_local_y(u) for u in monomer_atom_indices]
+    min_local_x = min(local_x_values)
+    max_local_x = max(local_x_values)
+    min_local_y = min(local_y_values)
+    max_local_y = max(local_y_values)
+    local_x_span = max(max_local_x - min_local_x, 1e-6)
+    local_y_span = max(max_local_y - min_local_y, 1e-6)
+
+    def is_middle_cut_site(u):
+        normalized_x = (conf.GetAtomPosition(u).x - min_local_x) / local_x_span
+        normalized_y = (get_local_y(u) - min_local_y) / local_y_span
+        return 0.20 <= normalized_x <= 0.80 and 0.25 <= normalized_y <= 0.75
+
+    cut_bonds = set()
+    boundary_bonds = set()
+    for u in broken_bonds:
+        for neighbor in original_mol.GetAtomWithIdx(u).GetNeighbors():
+            n_idx = neighbor.GetIdx()
+            if n_idx in monomer_atom_indices:
+                continue
+            bond_key = frozenset((u, n_idx))
+            if bond_key in cut_atom_bonds and is_middle_cut_site(u):
+                cut_bonds.add(u)
+            else:
+                boundary_bonds.add(u)
+
+    if not cut_bonds:
+        return []
+
+    selected_boundary_side = "left" if top_exit_direction == "left" else "right"
+    selected_boundary_bonds = left_bonds if selected_boundary_side == "left" else right_bonds
+    selected_boundary_bonds = [u for u in selected_boundary_bonds if u in boundary_bonds]
+    selected_boundary_bonds.sort(key=get_local_y, reverse=True)
 
     capped_mols = []
-    for br_pair in br_pairs:
+    carbon_choices = selected_boundary_bonds or [None]
+    for carbon_bond in carbon_choices:
         rw_mol = Chem.RWMol(base_rw_mol)
-        for atom_idx in br_pair:
+        for u in sorted(cut_bonds):
             cap = rw_mol.AddAtom(Chem.Atom("Br"))
-            rw_mol.AddBond(old_to_new_map[atom_idx], cap, Chem.BondType.SINGLE)
+            rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
+        if carbon_bond is not None:
+            cap = rw_mol.AddAtom(Chem.Atom("C"))
+            rw_mol.AddBond(old_to_new_map[carbon_bond], cap, Chem.BondType.SINGLE)
         try:
             Chem.SanitizeMol(rw_mol)
             capped_mols.append(rw_mol.GetMol())
         except Exception:
             pass
-
     return capped_mols
 
 def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
@@ -219,17 +313,17 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         top_exit_direction = global_cutting_plan.top_exit_direction or ""
         cutting_edges = global_cutting_plan.cutting_edges
 
-    _cut_boundary_hex_ids, cut_atom_bonds = _collect_cut_boundary(original_mol, all_hexes, cutting_edges)
+    cut_boundary_hex_ids, cut_atom_bonds = _collect_cut_boundary(original_mol, all_hexes, cutting_edges)
     if not cut_atom_bonds:
         result.failure_reason = "no molecular cut bonds mapped from cut path"
         return result
 
     window_candidates = []
     
-    for start_col in range(0, max_col - k + 1, k):
+    for start_col in range(max_col - k + 1):
         window_hexes = [
             h for h in all_hexes
-            if start_col <= h.col < start_col + k
+            if h.id not in cut_boundary_hex_ids and start_col <= h.col < start_col + k
         ]
         if not window_hexes: continue
         if not _hexes_form_connected_fused_component(window_hexes): continue
@@ -253,9 +347,9 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         for start_col, window_hexes, num_atoms in window_candidates
         if start_col > 0 and start_col + k < max_col
     ]
-    candidate_pool = interior_candidates or window_candidates
+    candidate_pool = interior_candidates
     if not candidate_pool:
-        result.failure_reason = "no periodic monomer windows generated"
+        result.failure_reason = "no interior periodic monomer windows generated"
         return result
     max_atoms = max(num_atoms for _start_col, _window_hexes, num_atoms in candidate_pool)
     monomer_windows = [
@@ -307,23 +401,11 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         result.failure_reason = "no valid raw monomer smiles generated"
         return result
 
-    raw_aromatic_ring_count = max(_count_aromatic_rings(mol) for mol in raw_results)
-    capped_results = [
-        mol for mol in capped_results
-        if _count_aromatic_rings(mol) >= raw_aromatic_ring_count
-    ]
+    if not capped_results:
+        result.failure_reason = "no valid capped monomer smiles generated"
+        return result
 
-    unique_capped_results = []
-    unique_capped_smiles = set()
-    for mol in capped_results:
-        smi = Chem.MolToSmiles(mol)
-        if smi in unique_capped_smiles:
-            continue
-        unique_capped_smiles.add(smi)
-        unique_capped_results.append(mol)
-    capped_results = unique_capped_results
-
-    # 保存文件
+    # 保存文件。先确认 capped 产物存在，再写 raw，避免留下 raw-only 半成品 artifact。
     for idx, mol in enumerate(raw_results):
         smi = Chem.MolToSmiles(mol)
         out_name = raw_smi_filename if len(raw_results) == 1 else raw_smi_filename.replace(".smi", f"_{idx+1}.smi")
@@ -336,10 +418,6 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         except Exception as exc:
             result.failure_reason = f"failed to write raw smiles: {exc}"
             return result
-
-    if not capped_results:
-        result.failure_reason = "no valid capped monomer smiles generated"
-        return result
 
     for idx, mol in enumerate(capped_results):
         smi = Chem.MolToSmiles(mol)
