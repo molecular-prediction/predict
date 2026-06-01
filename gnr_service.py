@@ -301,6 +301,7 @@ def run_pipeline(
     _edges, all_adj = build_edges_and_adj_geometric(hexes)
 
     found_any_global = False
+    seen_product_signatures = set()
 
     for k in range(1, max_k_attempts + 1):
         if k > total_width:
@@ -359,6 +360,25 @@ def run_pipeline(
                     monomer_result.failure_reason,
                 )
                 continue
+
+            product_signature = (
+                k,
+                global_plan.top_exit_direction,
+                global_plan.bottom_exit_direction,
+                tuple(sorted(monomer_result.raw_smiles)),
+                tuple(sorted(monomer_result.capped_smiles)),
+            )
+            if product_signature in seen_product_signatures:
+                logger.info(
+                    "Skip duplicate cut product: k=%s candidate_variant=%s top=%s bottom=%s",
+                    k,
+                    next_variant,
+                    global_plan.top_exit_direction,
+                    global_plan.bottom_exit_direction,
+                )
+                _clear_artifact_files(base_name)
+                continue
+            seen_product_signatures.add(product_signature)
 
             variant_count = next_variant
             found_any_global = True
