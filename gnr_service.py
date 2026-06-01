@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from gnr_graph import (
     apply_path_to_all_tiles,
     build_edges_and_adj_geometric,
+    infer_minimal_period_cols,
     mol_to_hex_grid,
     partition_into_tiles,
     read_smiles_and_generate_coords,
@@ -287,7 +288,7 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
 
 def run_pipeline(
     input_file: str,
-    max_k_attempts: Optional[int] = None,
+    max_k_attempts: Optional[int] = 5,
     llm_provider: Optional[OpenAILLMProvider] = None,
 ) -> PredictionRun:
     ensure_output_dirs()
@@ -298,11 +299,18 @@ def run_pipeline(
 
     mol = read_smiles_and_generate_coords(input_file)
     hexes, total_width = mol_to_hex_grid(mol)
+    minimal_period_cols = infer_minimal_period_cols(hexes, total_width)
     _edges, all_adj = build_edges_and_adj_geometric(hexes)
 
     found_any_global = False
     seen_product_signatures = set()
     max_k = total_width if max_k_attempts is None else min(max_k_attempts, total_width)
+    logger.info(
+        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s",
+        total_width,
+        minimal_period_cols,
+        max_k,
+    )
 
     for k in range(1, max_k + 1):
         tiles = partition_into_tiles(hexes, k_cols=k)
@@ -318,6 +326,7 @@ def run_pipeline(
             tile_hexes
             for _tidx, tile_hexes in sorted(tiles.items())
             if len({h.row for h in tile_hexes}) == max_row_count
+            and min(h.col for h in tile_hexes) < minimal_period_cols
         ]
 
         for template_tile in template_tiles:
@@ -383,10 +392,6 @@ def run_pipeline(
 
                 product_signature = (
                     k,
-                    global_plan.top_exit_direction,
-                    global_plan.bottom_exit_direction,
-                    relative_path_signature,
-                    tuple(sorted(monomer_result.raw_smiles)),
                     tuple(sorted(monomer_result.capped_smiles)),
                 )
                 if product_signature in seen_product_signatures:

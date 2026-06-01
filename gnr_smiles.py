@@ -161,15 +161,27 @@ def extract_all_capped_monomers(
     if len(candidate_sites) < 2:
         return []
 
-    candidate_sites.sort(key=lambda item: (item[1], item[2]))
-    left_sites = [item for item in candidate_sites if item[1] <= candidate_sites[len(candidate_sites) // 2][1]]
-    right_sites = [item for item in candidate_sites if item[1] > candidate_sites[len(candidate_sites) // 2][1]]
+    min_x = min(item[1] for item in candidate_sites)
+    max_x = max(item[1] for item in candidate_sites)
+    x_span = max(max_x - min_x, 1e-6)
+    edge_width = max(0.20 * x_span, 1e-6)
+    left_sites = [item for item in candidate_sites if item[1] <= min_x + edge_width]
+    right_sites = [item for item in candidate_sites if item[1] >= max_x - edge_width]
 
     br_pairs = []
     if left_sites and right_sites:
         for left in left_sites:
-            for right in right_sites:
-                br_pairs.append((left[0], right[0]))
+            best_right = min(
+                right_sites,
+                key=lambda right: (abs(right[2] - left[2]), -abs(right[1] - left[1])),
+            )
+            br_pairs.append((left[0], best_right[0]))
+        for right in right_sites:
+            best_left = min(
+                left_sites,
+                key=lambda left: (abs(left[2] - right[2]), -abs(right[1] - left[1])),
+            )
+            br_pairs.append((best_left[0], right[0]))
     else:
         for i, first in enumerate(candidate_sites):
             for second in candidate_sites[i + 1:]:
@@ -180,7 +192,7 @@ def extract_all_capped_monomers(
         p2 = conf.GetAtomPosition(pair[1])
         return (-abs(p1.x - p2.x), abs(p1.y - p2.y), p1.x + p2.x)
 
-    br_pairs = sorted(set(tuple(sorted(pair)) for pair in br_pairs), key=pair_score)[:12]
+    br_pairs = sorted(set(tuple(sorted(pair)) for pair in br_pairs), key=pair_score)[:4]
 
     capped_mols = []
     for br_pair in br_pairs:
@@ -326,16 +338,7 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
             return result
 
     if not capped_results:
-        for idx, mol in enumerate(raw_results):
-            out_img_name = img_filename if len(raw_results) == 1 else img_filename.replace(".png", f"_{idx+1}.png")
-            try:
-                AllChem.Compute2DCoords(mol)
-                Draw.MolToFile(mol, out_img_name, size=(600, 600))
-                result.monomer_images.append(out_img_name)
-            except Exception:
-                pass
-        result.is_valid = bool(result.raw_smiles)
-        result.failure_reason = "no valid capped monomer smiles generated; wrote raw monomer image"
+        result.failure_reason = "no valid capped monomer smiles generated"
         return result
 
     for idx, mol in enumerate(capped_results):

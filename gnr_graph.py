@@ -110,6 +110,28 @@ def partition_into_tiles(hexes: List[BenzeneHex], k_cols: int) -> Dict[int, List
     return groups
 
 
+def infer_minimal_period_cols(hexes: List[BenzeneHex], total_width: int) -> int:
+    if total_width <= 1:
+        return max(total_width, 1)
+
+    row_counts_by_col = []
+    for col in range(total_width):
+        rows = sorted(h.row for h in hexes if h.col == col)
+        row_counts_by_col.append(tuple(rows))
+
+    for period in range(1, total_width + 1):
+        if total_width % period != 0:
+            continue
+        ok = True
+        for col in range(total_width):
+            if row_counts_by_col[col] != row_counts_by_col[col % period]:
+                ok = False
+                break
+        if ok:
+            return period
+    return total_width
+
+
 def _direction_from_dx(dx: float) -> str:
     return "right" if dx >= 0 else "left"
 

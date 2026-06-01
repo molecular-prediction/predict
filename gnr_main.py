@@ -11,7 +11,7 @@ logging.basicConfig(
 
 def main():
     input_file = "smile/gnr_7ac_segment.smi"
-    result = run_pipeline(input_file, max_k_attempts=999)
+    result = run_pipeline(input_file)
     if not result.found_any_global:
         print("\n未找到任何有效的切割方案。")
     else:
