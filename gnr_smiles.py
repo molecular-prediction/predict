@@ -137,7 +137,6 @@ def extract_all_capped_monomers(
         base_rw_mol.GetAtomWithIdx(new_idx).SetFormalCharge(atom.GetFormalCharge())
         old_to_new_map[old_idx] = new_idx
 
-    br_sites = set()
     for old_idx in sorted_old_indices:
         orig_atom = original_mol.GetAtomWithIdx(old_idx)
         for neighbor in orig_atom.GetNeighbors():
@@ -145,51 +144,50 @@ def extract_all_capped_monomers(
             if n_idx in monomer_atom_indices and n_idx > old_idx:
                 bond = original_mol.GetBondBetweenAtoms(old_idx, n_idx)
                 if bond:
-                    bond_key = frozenset((old_idx, n_idx))
-                    if bond_key in cut_atom_bonds:
-                        br_sites.update([old_idx, n_idx])
-                        continue
                     base_rw_mol.AddBond(old_to_new_map[old_idx], old_to_new_map[n_idx], bond.GetBondType())
 
-    if not br_sites:
+    conf = original_mol.GetConformer()
+    candidate_sites = []
+    for old_idx in sorted_old_indices:
+        atom = original_mol.GetAtomWithIdx(old_idx)
+        if atom.GetSymbol() != "C" or not atom.GetIsAromatic():
+            continue
+        # A degree-2 aromatic carbon is a peripheral C-H site in the source PAH.
+        # These are valid aryl bromide precursor positions; degree-3 fused atoms are not.
+        if atom.GetDegree() == 2:
+            pos = conf.GetAtomPosition(old_idx)
+            candidate_sites.append((old_idx, pos.x, pos.y))
+
+    if len(candidate_sites) < 2:
         return []
 
-    conf = original_mol.GetConformer()
-    xs = [conf.GetAtomPosition(idx).x for idx in monomer_atom_indices]
-    x_mid = (min(xs) + max(xs)) / 2.0
-    selected_side = "left" if top_exit_direction == "left" else "right"
-    boundary_sites = set()
-    for old_idx in sorted_old_indices:
-        orig_atom = original_mol.GetAtomWithIdx(old_idx)
-        for neighbor in orig_atom.GetNeighbors():
-            n_idx = neighbor.GetIdx()
-            if n_idx in monomer_atom_indices:
-                continue
-            if frozenset((old_idx, n_idx)) in cut_atom_bonds:
-                continue
-            boundary_sites.add(old_idx)
+    candidate_sites.sort(key=lambda item: (item[1], item[2]))
+    left_sites = [item for item in candidate_sites if item[1] <= candidate_sites[len(candidate_sites) // 2][1]]
+    right_sites = [item for item in candidate_sites if item[1] > candidate_sites[len(candidate_sites) // 2][1]]
 
-    def is_selected_side(atom_idx: int) -> bool:
-        x = conf.GetAtomPosition(atom_idx).x
-        return x < x_mid if selected_side == "left" else x >= x_mid
+    br_pairs = []
+    if left_sites and right_sites:
+        for left in left_sites:
+            for right in right_sites:
+                br_pairs.append((left[0], right[0]))
+    else:
+        for i, first in enumerate(candidate_sites):
+            for second in candidate_sites[i + 1:]:
+                br_pairs.append((first[0], second[0]))
 
-    carbon_choices = sorted(
-        [idx for idx in boundary_sites if idx not in br_sites and is_selected_side(idx)],
-        key=lambda idx: (conf.GetAtomPosition(idx).y, conf.GetAtomPosition(idx).x),
-        reverse=True,
-    )
-    if not carbon_choices:
-        carbon_choices = [None]
+    def pair_score(pair):
+        p1 = conf.GetAtomPosition(pair[0])
+        p2 = conf.GetAtomPosition(pair[1])
+        return (-abs(p1.x - p2.x), abs(p1.y - p2.y), p1.x + p2.x)
+
+    br_pairs = sorted(set(tuple(sorted(pair)) for pair in br_pairs), key=pair_score)[:12]
 
     capped_mols = []
-    for carbon_site in carbon_choices:
+    for br_pair in br_pairs:
         rw_mol = Chem.RWMol(base_rw_mol)
-        for atom_idx in sorted(br_sites):
+        for atom_idx in br_pair:
             cap = rw_mol.AddAtom(Chem.Atom("Br"))
             rw_mol.AddBond(old_to_new_map[atom_idx], cap, Chem.BondType.SINGLE)
-        if carbon_site is not None:
-            cap = rw_mol.AddAtom(Chem.Atom("C"))
-            rw_mol.AddBond(old_to_new_map[carbon_site], cap, Chem.BondType.SINGLE)
         try:
             Chem.SanitizeMol(rw_mol)
             capped_mols.append(rw_mol.GetMol())
