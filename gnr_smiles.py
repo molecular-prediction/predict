@@ -69,6 +69,14 @@ def _count_atoms_by_symbol(mol: Chem.Mol, symbol: str) -> int:
     return sum(1 for atom in mol.GetAtoms() if atom.GetSymbol() == symbol)
 
 
+def _count_terminal_aliphatic_carbons(mol: Chem.Mol) -> int:
+    return sum(
+        1
+        for atom in mol.GetAtoms()
+        if atom.GetSymbol() == "C" and not atom.GetIsAromatic() and atom.GetDegree() == 1
+    )
+
+
 def _hexes_form_connected_fused_component(window_hexes: List[BenzeneHex]) -> bool:
     if not window_hexes:
         return False
@@ -266,19 +274,29 @@ def extract_all_capped_monomers(
     if not cut_bonds:
         return []
 
-    selected_boundary_side = "left" if top_exit_direction == "left" else "right"
-    selected_boundary_bonds = left_bonds if selected_boundary_side == "left" else right_bonds
-    selected_boundary_bonds = [u for u in selected_boundary_bonds if u in boundary_bonds]
-    selected_boundary_bonds.sort(key=get_local_y, reverse=True)
+    left_boundary_bonds = [u for u in left_bonds if u in boundary_bonds]
+    right_boundary_bonds = [u for u in right_bonds if u in boundary_bonds]
+    left_boundary_bonds.sort(key=get_local_y, reverse=True)
+    right_boundary_bonds.sort(key=get_local_y, reverse=True)
 
     capped_mols = []
-    carbon_choices = selected_boundary_bonds or [None]
-    for carbon_bond in carbon_choices:
+    carbon_choices = []
+    if left_boundary_bonds and right_boundary_bonds:
+        for left_bond in left_boundary_bonds:
+            for right_bond in right_boundary_bonds:
+                carbon_choices.append((left_bond, right_bond))
+    else:
+        fallback_boundary_bonds = sorted(boundary_bonds, key=get_local_y, reverse=True)
+        for i, first in enumerate(fallback_boundary_bonds):
+            for second in fallback_boundary_bonds[i + 1:]:
+                carbon_choices.append((first, second))
+
+    for carbon_bonds in carbon_choices:
         rw_mol = Chem.RWMol(base_rw_mol)
         for u in sorted(cut_bonds):
             cap = rw_mol.AddAtom(Chem.Atom("Br"))
             rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
-        if carbon_bond is not None:
+        for carbon_bond in carbon_bonds:
             cap = rw_mol.AddAtom(Chem.Atom("C"))
             rw_mol.AddBond(old_to_new_map[carbon_bond], cap, Chem.BondType.SINGLE)
         try:
@@ -394,9 +412,10 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
     capped_results = [
         mol for mol in capped_results
         if _count_atoms_by_symbol(mol, "Br") == 2
+        and _count_terminal_aliphatic_carbons(mol) == 2
     ]
     if not capped_results:
-        result.failure_reason = "no dibrominated capped monomer smiles generated"
+        result.failure_reason = "no dibrominated dimethyl capped monomer smiles generated"
         return result
 
     # 保存文件。先确认 capped 产物存在，再写 raw，避免留下 raw-only 半成品 artifact。
