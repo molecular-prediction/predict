@@ -157,7 +157,10 @@ def extract_all_capped_monomers(
     if not broken_bonds: return []
 
     # 2. 将断键分为左右两侧，并建立局部相对坐标系 (抵抗全局分子倾斜)
-    if len(window_hexes) == 2:
+    # The older two-hex branch places Br on outer edge bonds; keep it disabled until
+    # capped products are derived from explicit cut bonds instead of edge heuristics.
+    use_legacy_two_hex_capping = False
+    if use_legacy_two_hex_capping and len(window_hexes) == 2:
         h1, h2 = window_hexes[0], window_hexes[1]
         # 确保 h1 在左，h2 在右
         if h1.col > h2.col or (h1.col == h2.col and h1.cx > h2.cx):
@@ -324,17 +327,17 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         top_exit_direction = global_cutting_plan.top_exit_direction or ""
         cutting_edges = global_cutting_plan.cutting_edges
 
-    cut_boundary_hex_ids, cut_atom_bonds = _collect_cut_boundary(original_mol, all_hexes, cutting_edges)
+    _cut_boundary_hex_ids, cut_atom_bonds = _collect_cut_boundary(original_mol, all_hexes, cutting_edges)
     if not cut_atom_bonds:
         result.failure_reason = "no molecular cut bonds mapped from cut path"
         return result
 
     window_candidates = []
     
-    for start_col in range(max_col - k + 1):
+    for start_col in range(0, max_col - k + 1, k):
         window_hexes = [
             h for h in all_hexes
-            if h.id not in cut_boundary_hex_ids and start_col <= h.col < start_col + k
+            if start_col <= h.col < start_col + k
         ]
         if not window_hexes: continue
         if not _hexes_form_connected_fused_component(window_hexes): continue
@@ -358,9 +361,9 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         for start_col, window_hexes, num_atoms in window_candidates
         if start_col > 0 and start_col + k < max_col
     ]
-    candidate_pool = interior_candidates
+    candidate_pool = interior_candidates or window_candidates
     if not candidate_pool:
-        result.failure_reason = "no interior periodic monomer windows generated"
+        result.failure_reason = "no periodic monomer windows generated"
         return result
     max_atoms = max(num_atoms for _start_col, _window_hexes, num_atoms in candidate_pool)
     monomer_windows = [
@@ -411,9 +414,6 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
     if not raw_results:
         result.failure_reason = "no valid raw monomer smiles generated"
         return result
-    if not capped_results:
-        result.failure_reason = "no valid capped monomer smiles generated"
-        return result
 
     unique_capped_results = []
     unique_capped_smiles = set()
@@ -424,9 +424,6 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         unique_capped_smiles.add(smi)
         unique_capped_results.append(mol)
     capped_results = unique_capped_results
-    if not capped_results:
-        result.failure_reason = "no unique capped monomer smiles generated"
-        return result
 
     # 保存文件
     for idx, mol in enumerate(raw_results):
@@ -441,6 +438,11 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         except Exception as exc:
             result.failure_reason = f"failed to write raw smiles: {exc}"
             return result
+
+    if not capped_results:
+        result.is_valid = bool(result.raw_smiles)
+        result.failure_reason = "no valid capped monomer smiles generated"
+        return result
 
     for idx, mol in enumerate(capped_results):
         smi = Chem.MolToSmiles(mol)

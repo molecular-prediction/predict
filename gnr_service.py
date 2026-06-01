@@ -287,7 +287,7 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
 
 def run_pipeline(
     input_file: str,
-    max_k_attempts: int = 5,
+    max_k_attempts: Optional[int] = None,
     llm_provider: Optional[OpenAILLMProvider] = None,
 ) -> PredictionRun:
     ensure_output_dirs()
@@ -302,150 +302,137 @@ def run_pipeline(
 
     found_any_global = False
     seen_product_signatures = set()
-    seen_capped_smiles = set()
+    max_k = total_width if max_k_attempts is None else min(max_k_attempts, total_width)
 
-    for k in range(1, max_k_attempts + 1):
-        if k > total_width:
-            continue
-
+    for k in range(1, max_k + 1):
         tiles = partition_into_tiles(hexes, k_cols=k)
         if not tiles:
             continue
 
-        # 动态寻找具有最完整高度（跨越行数最多）的图块作为模板，而不是死板地取 Tile 0
-        best_tidx = max(tiles.keys(), key=lambda t: len({h.row for h in tiles[t]}))
-        template_tile = tiles[best_tidx]
-
-        if len({h.row for h in template_tile}) <= 1:
-            continue
-
-        template_finder = EdgeCuttingPathFinder(template_tile, all_adj, k_cols=k)
-        all_possible_paths = template_finder.find_all_paths()
-        if not all_possible_paths:
+        max_row_count = max(len({h.row for h in tile_hexes}) for tile_hexes in tiles.values())
+        if max_row_count <= 1:
             continue
 
         variant_count = 0
-        for path in all_possible_paths:
-            global_plan = apply_path_to_all_tiles(path, template_tile, tiles, all_adj)
-            if not global_plan.is_complete:
-                logger.info(
-                    "Skip incomplete global cut plan: k=%s reason=%s",
-                    k,
-                    global_plan.invalid_reason,
-                )
+        template_tiles = [
+            tile_hexes
+            for _tidx, tile_hexes in sorted(tiles.items())
+            if len({h.row for h in tile_hexes}) == max_row_count
+        ]
+
+        for template_tile in template_tiles:
+            template_hex_by_id = {h.id: h for h in template_tile}
+            template_finder = EdgeCuttingPathFinder(template_tile, all_adj, k_cols=k)
+            all_possible_paths = template_finder.find_all_paths()
+            if not all_possible_paths:
                 continue
 
-            next_variant = variant_count + 1
-            base_name = f"cut_method_k{k}_v{next_variant}"
-            img_path = PHOTO_DIR / f"{base_name}.png"
-            raw_smi_path = SMILE_RAW_DIR / f"{base_name}_raw.smi"
-            capped_smi_path = SMILE_CAPPED_DIR / f"{base_name}_capped.smi"
-            monomer_img_path = MONOMER_IMG_DIR / f"{base_name}_monomer.png"
+            for path in all_possible_paths:
+                relative_path_signature = []
+                for u, v in path:
+                    h1 = template_hex_by_id.get(u)
+                    h2 = template_hex_by_id.get(v)
+                    if h1 is None or h2 is None:
+                        continue
+                    diff = h2.relative_col - h1.relative_col
+                    shift = 0
+                    if diff > 1.5:
+                        shift = -1
+                    elif diff < -1.5:
+                        shift = 1
+                    relative_path_signature.append(
+                        (h1.row, h1.relative_col, h2.row, h2.relative_col, shift)
+                    )
+                relative_path_signature = tuple(relative_path_signature)
 
-            _clear_artifact_files(base_name)
-            monomer_result = generate_monomer_smiles_periodic(
-                mol,
-                hexes,
-                global_plan,
-                k,
-                total_width,
-                str(raw_smi_path),
-                str(capped_smi_path),
-                str(monomer_img_path),
-            )
-            if not monomer_result.is_valid:
-                logger.info(
-                    "Skip cut plan without complete monomer outputs: k=%s candidate_variant=%s reason=%s",
-                    k,
-                    next_variant,
-                    monomer_result.failure_reason,
-                )
-                continue
-
-            filtered_capped_smiles = []
-            filtered_capped_files = []
-            filtered_monomer_images = []
-            for idx, smile in enumerate(monomer_result.capped_smiles):
-                if smile in seen_capped_smiles:
-                    for path_text in [
-                        monomer_result.capped_files[idx] if idx < len(monomer_result.capped_files) else "",
-                        monomer_result.monomer_images[idx] if idx < len(monomer_result.monomer_images) else "",
-                    ]:
-                        if path_text:
-                            try:
-                                Path(path_text).unlink()
-                            except OSError:
-                                logger.warning("Failed to remove duplicate capped output: %s", path_text)
+                global_plan = apply_path_to_all_tiles(path, template_tile, tiles, all_adj)
+                if not global_plan.is_complete:
+                    logger.info(
+                        "Skip incomplete global cut plan: k=%s reason=%s",
+                        k,
+                        global_plan.invalid_reason,
+                    )
                     continue
-                filtered_capped_smiles.append(smile)
-                if idx < len(monomer_result.capped_files):
-                    filtered_capped_files.append(monomer_result.capped_files[idx])
-                if idx < len(monomer_result.monomer_images):
-                    filtered_monomer_images.append(monomer_result.monomer_images[idx])
 
-            monomer_result.capped_smiles = filtered_capped_smiles
-            monomer_result.capped_files = filtered_capped_files
-            monomer_result.monomer_images = filtered_monomer_images
-            if not monomer_result.capped_smiles:
-                logger.info(
-                    "Skip cut plan with only duplicate capped products: k=%s candidate_variant=%s",
-                    k,
-                    next_variant,
-                )
+                next_variant = variant_count + 1
+                base_name = f"cut_method_k{k}_v{next_variant}"
+                img_path = PHOTO_DIR / f"{base_name}.png"
+                raw_smi_path = SMILE_RAW_DIR / f"{base_name}_raw.smi"
+                capped_smi_path = SMILE_CAPPED_DIR / f"{base_name}_capped.smi"
+                monomer_img_path = MONOMER_IMG_DIR / f"{base_name}_monomer.png"
+
                 _clear_artifact_files(base_name)
-                continue
-
-            renamed_capped_files = []
-            renamed_monomer_images = []
-            temp_pairs = []
-            for file_index, path_text in enumerate(monomer_result.capped_files, start=1):
-                source = Path(path_text)
-                if not source.exists():
-                    continue
-                temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
-                source.rename(temp_path)
-                final_path = SMILE_CAPPED_DIR / f"{base_name}_capped_{file_index}.smi"
-                temp_pairs.append((temp_path, final_path, renamed_capped_files))
-            for file_index, path_text in enumerate(monomer_result.monomer_images, start=1):
-                source = Path(path_text)
-                if not source.exists():
-                    continue
-                temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
-                source.rename(temp_path)
-                final_path = MONOMER_IMG_DIR / f"{base_name}_monomer_{file_index}.png"
-                temp_pairs.append((temp_path, final_path, renamed_monomer_images))
-            for temp_path, final_path, output_list in temp_pairs:
-                temp_path.rename(final_path)
-                output_list.append(str(final_path))
-            monomer_result.capped_files = renamed_capped_files
-            monomer_result.monomer_images = renamed_monomer_images
-
-            product_signature = (
-                k,
-                global_plan.top_exit_direction,
-                global_plan.bottom_exit_direction,
-                tuple(sorted(monomer_result.raw_smiles)),
-                tuple(sorted(monomer_result.capped_smiles)),
-            )
-            if product_signature in seen_product_signatures:
-                logger.info(
-                    "Skip duplicate cut product: k=%s candidate_variant=%s top=%s bottom=%s",
+                monomer_result = generate_monomer_smiles_periodic(
+                    mol,
+                    hexes,
+                    global_plan,
                     k,
-                    next_variant,
+                    total_width,
+                    str(raw_smi_path),
+                    str(capped_smi_path),
+                    str(monomer_img_path),
+                )
+                if not monomer_result.is_valid:
+                    logger.info(
+                        "Skip cut plan without complete monomer outputs: k=%s candidate_variant=%s reason=%s",
+                        k,
+                        next_variant,
+                        monomer_result.failure_reason,
+                    )
+                    continue
+
+                product_signature = (
+                    k,
                     global_plan.top_exit_direction,
                     global_plan.bottom_exit_direction,
+                    relative_path_signature,
+                    tuple(sorted(monomer_result.raw_smiles)),
+                    tuple(sorted(monomer_result.capped_smiles)),
                 )
-                _clear_artifact_files(base_name)
-                continue
-            seen_product_signatures.add(product_signature)
-            seen_capped_smiles.update(monomer_result.capped_smiles)
+                if product_signature in seen_product_signatures:
+                    logger.info(
+                        "Skip duplicate cut product: k=%s candidate_variant=%s top=%s bottom=%s",
+                        k,
+                        next_variant,
+                        global_plan.top_exit_direction,
+                        global_plan.bottom_exit_direction,
+                    )
+                    _clear_artifact_files(base_name)
+                    continue
+                seen_product_signatures.add(product_signature)
 
-            variant_count = next_variant
-            found_any_global = True
-            draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
+                if monomer_result.capped_smiles:
+                    renamed_capped_files = []
+                    renamed_monomer_images = []
+                    temp_pairs = []
+                    for file_index, path_text in enumerate(monomer_result.capped_files, start=1):
+                        source = Path(path_text)
+                        if not source.exists():
+                            continue
+                        temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
+                        source.rename(temp_path)
+                        final_path = SMILE_CAPPED_DIR / f"{base_name}_capped_{file_index}.smi"
+                        temp_pairs.append((temp_path, final_path, renamed_capped_files))
+                    for file_index, path_text in enumerate(monomer_result.monomer_images, start=1):
+                        source = Path(path_text)
+                        if not source.exists():
+                            continue
+                        temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
+                        source.rename(temp_path)
+                        final_path = MONOMER_IMG_DIR / f"{base_name}_monomer_{file_index}.png"
+                        temp_pairs.append((temp_path, final_path, renamed_monomer_images))
+                    for temp_path, final_path, output_list in temp_pairs:
+                        temp_path.rename(final_path)
+                        output_list.append(str(final_path))
+                    monomer_result.capped_files = renamed_capped_files
+                    monomer_result.monomer_images = renamed_monomer_images
 
-            if variant_count >= 5:
-                break
+                variant_count = next_variant
+                found_any_global = True
+                draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
+
+        if variant_count == 0:
+            logger.info("No valid cut variants accepted for k=%s", k)
 
     artifacts = _collect_outputs_since(start_ts)
     _judge_artifacts(artifacts, provider)
