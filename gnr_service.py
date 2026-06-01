@@ -392,7 +392,7 @@ def run_pipeline(
 
                 product_signature = (
                     k,
-                    tuple(sorted(monomer_result.capped_smiles)),
+                    tuple(sorted(monomer_result.raw_smiles)),
                 )
                 if product_signature in seen_product_signatures:
                     logger.info(
