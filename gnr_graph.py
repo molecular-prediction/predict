@@ -52,10 +52,11 @@ def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
             "vertices": atom_coords
         })
 
+    avg_ring_size = sum(ring["size"] for ring in raw_rings) / len(raw_rings)
     sorted_by_y = sorted(raw_rings, key=lambda x: x['cy'], reverse=True)
     rows = []
     current_row = [sorted_by_y[0]]
-    Y_THRESHOLD = 0.5
+    Y_THRESHOLD = avg_ring_size * 0.55
     for ring in sorted_by_y[1:]:
         if abs(ring['cy'] - current_row[0]['cy']) < Y_THRESHOLD:
             current_row.append(ring)
@@ -229,6 +230,8 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
     if not expected_tiles:
         plan.invalid_reason = "no complete tiles matching template"
         return plan
+    skipped_tiles = []
+    id_map = {h.id: h for hexes in all_tiles.values() for h in hexes}
     
     # 2. 全局应用
     # 遍历每一个 tile 作为起点 tile
@@ -238,12 +241,13 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
         current_coord_map = {(h.row, h.relative_col): h.id for h in tile_hexes}
         
         current_tile_path = []
+        skip_reason = ""
         
         for (r1, c1, r2, c2, shift) in path_signature_with_shift:
             # 起点必须在当前 tile 中
             if (r1, c1) not in current_coord_map:
-                plan.invalid_reason = f"tile {tidx} missing start coordinate {(r1, c1)}"
-                return plan
+                skip_reason = f"tile {tidx} missing start coordinate {(r1, c1)}"
+                break
             u_id = current_coord_map[(r1, c1)]
             
             # 终点可能在 neighbor tile 中
@@ -251,14 +255,14 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
             target_tile_hexes = all_tiles.get(target_tile_idx)
             
             if not target_tile_hexes:
-                plan.invalid_reason = f"tile {tidx} missing target tile {target_tile_idx}"
-                return plan
+                skip_reason = f"tile {tidx} missing target tile {target_tile_idx}"
+                break
                 
             target_coord_map = {(h.row, h.relative_col): h.id for h in target_tile_hexes}
             
             if (r2, c2) not in target_coord_map:
-                plan.invalid_reason = f"tile {target_tile_idx} missing target coordinate {(r2, c2)}"
-                return plan
+                skip_reason = f"tile {target_tile_idx} missing target coordinate {(r2, c2)}"
+                break
                 
             v_id = target_coord_map[(r2, c2)]
             
@@ -266,12 +270,16 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
             if v_id in full_adj.get(u_id, []):
                 current_tile_path.append((u_id, v_id))
             else:
-                plan.invalid_reason = f"tile {tidx} mapped edge {(u_id, v_id)} is not physically adjacent"
-                return plan
+                skip_reason = f"tile {tidx} mapped edge {(u_id, v_id)} is not physically adjacent"
+                break
+
+        if skip_reason:
+            skipped_tiles.append(skip_reason)
+            continue
 
         if len(current_tile_path) != len(path_signature_with_shift):
-            plan.invalid_reason = f"tile {tidx} mapped incomplete path"
-            return plan
+            skipped_tiles.append(f"tile {tidx} mapped incomplete path")
+            continue
 
         top_start_global = current_coord_map[(top_start.row, top_start.relative_col)]
         top_next_tile = tidx + path_signature_with_shift[0][4]
@@ -285,13 +293,12 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
         bottom_end_global_hex = bottom_end_map.get((bottom_end.row, bottom_end.relative_col))
         bottom_prev_global = current_coord_map[(bottom_prev.row, bottom_prev.relative_col)]
 
-        id_map = {h.id: h for hexes in all_tiles.values() for h in hexes}
         if top_next_global_hex is None or top_start_global not in id_map:
-            plan.invalid_reason = f"tile {tidx} cannot build top endpoint extension"
-            return plan
+            skipped_tiles.append(f"tile {tidx} cannot build top endpoint extension")
+            continue
         if bottom_end_global_hex is None or bottom_prev_global not in id_map:
-            plan.invalid_reason = f"tile {tidx} cannot build bottom endpoint extension"
-            return plan
+            skipped_tiles.append(f"tile {tidx} cannot build bottom endpoint extension")
+            continue
 
         top_start_global_hex = id_map[top_start_global]
         bottom_prev_global_hex = id_map[bottom_prev_global]
@@ -317,7 +324,9 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
         plan.cutting_edges[tidx] = current_tile_path
         plan.complete_tile_count += 1
             
-    plan.is_complete = plan.complete_tile_count == plan.expected_tile_count and bool(plan.endpoint_extensions)
+    plan.is_complete = bool(plan.cutting_edges) and bool(plan.endpoint_extensions)
     if not plan.is_complete:
-        plan.invalid_reason = "global plan did not complete all expected tiles"
+        plan.invalid_reason = "global plan did not complete any tile"
+    elif skipped_tiles:
+        plan.invalid_reason = "; ".join(skipped_tiles[:3])
     return plan

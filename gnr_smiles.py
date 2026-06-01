@@ -55,6 +55,33 @@ def get_atom_to_hexes_map(all_hexes: List[BenzeneHex]) -> Dict[int, List[Benzene
             mapping.setdefault(idx, []).append(h)
     return mapping
 
+
+def _hexes_form_connected_fused_component(window_hexes: List[BenzeneHex]) -> bool:
+    if not window_hexes:
+        return False
+    if len(window_hexes) == 1:
+        return True
+
+    id_to_index = {h.id: idx for idx, h in enumerate(window_hexes)}
+    adjacency = {h.id: set() for h in window_hexes}
+    for i, h1 in enumerate(window_hexes):
+        atoms1 = set(h1.atom_indices)
+        for h2 in window_hexes[i + 1:]:
+            shared_atoms = atoms1.intersection(h2.atom_indices)
+            if len(shared_atoms) >= 2:
+                adjacency[h1.id].add(h2.id)
+                adjacency[h2.id].add(h1.id)
+
+    seen = {window_hexes[0].id}
+    stack = [window_hexes[0].id]
+    while stack:
+        hid = stack.pop()
+        for nid in adjacency[hid]:
+            if nid not in seen:
+                seen.add(nid)
+                stack.append(nid)
+    return len(seen) == len(id_to_index)
+
 def extract_all_capped_monomers(
     original_mol,
     window_hexes: List[BenzeneHex],
@@ -287,6 +314,7 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
     for start_col in range(max_col - k + 1):
         window_hexes = [h for h in kept_hexes if start_col <= h.col < start_col + k]
         if not window_hexes: continue
+        if not _hexes_form_connected_fused_component(window_hexes): continue
 
         mol = extract_submol_from_hexes(original_mol, window_hexes)
         if not mol: continue

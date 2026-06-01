@@ -108,7 +108,8 @@ class EdgeCuttingPathFinder:
             
             if (target_r, wrapped_c) in self.coord_map:
                 nei_id = self.coord_map[(target_r, wrapped_c)]
-                if nei_id != curr_id:
+                is_periodic_wrap = target_c != wrapped_c
+                if nei_id != curr_id and is_periodic_wrap:
                     logical_neighbors_ids.add(nei_id)
 
         all_potential_neighbors = physical_neighbor_ids.union(logical_neighbors_ids)
