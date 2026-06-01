@@ -65,6 +65,10 @@ def _count_aromatic_rings(mol: Chem.Mol) -> int:
     return count
 
 
+def _count_atoms_by_symbol(mol: Chem.Mol, symbol: str) -> int:
+    return sum(1 for atom in mol.GetAtoms() if atom.GetSymbol() == symbol)
+
+
 def _hexes_form_connected_fused_component(window_hexes: List[BenzeneHex]) -> bool:
     if not window_hexes:
         return False
@@ -239,30 +243,12 @@ def extract_all_capped_monomers(
                     pass
         return capped_mols
 
-    bridgeheads = set(aid for aid in sorted_old_indices if sum(
-        1 for n in original_mol.GetAtomWithIdx(aid).GetNeighbors()
-        if n.GetIdx() in monomer_atom_indices
-    ) >= 3)
     cx = sum(conf.GetAtomPosition(idx).x for idx in broken_bonds) / len(broken_bonds)
     left_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x < cx]
     right_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x >= cx]
 
     def get_local_y(u):
         return conf.GetAtomPosition(u).y
-
-    local_x_values = [conf.GetAtomPosition(u).x for u in monomer_atom_indices]
-    local_y_values = [get_local_y(u) for u in monomer_atom_indices]
-    min_local_x = min(local_x_values)
-    max_local_x = max(local_x_values)
-    min_local_y = min(local_y_values)
-    max_local_y = max(local_y_values)
-    local_x_span = max(max_local_x - min_local_x, 1e-6)
-    local_y_span = max(max_local_y - min_local_y, 1e-6)
-
-    def is_middle_cut_site(u):
-        normalized_x = (conf.GetAtomPosition(u).x - min_local_x) / local_x_span
-        normalized_y = (get_local_y(u) - min_local_y) / local_y_span
-        return 0.20 <= normalized_x <= 0.80 and 0.25 <= normalized_y <= 0.75
 
     cut_bonds = set()
     boundary_bonds = set()
@@ -272,7 +258,7 @@ def extract_all_capped_monomers(
             if n_idx in monomer_atom_indices:
                 continue
             bond_key = frozenset((u, n_idx))
-            if bond_key in cut_atom_bonds and is_middle_cut_site(u):
+            if bond_key in cut_atom_bonds:
                 cut_bonds.add(u)
             else:
                 boundary_bonds.add(u)
@@ -403,6 +389,14 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
 
     if not capped_results:
         result.failure_reason = "no valid capped monomer smiles generated"
+        return result
+
+    capped_results = [
+        mol for mol in capped_results
+        if _count_atoms_by_symbol(mol, "Br") == 2
+    ]
+    if not capped_results:
+        result.failure_reason = "no dibrominated capped monomer smiles generated"
         return result
 
     # 保存文件。先确认 capped 产物存在，再写 raw，避免留下 raw-only 半成品 artifact。
