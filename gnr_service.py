@@ -302,6 +302,7 @@ def run_pipeline(
 
     found_any_global = False
     seen_product_signatures = set()
+    seen_capped_smiles = set()
 
     for k in range(1, max_k_attempts + 1):
         if k > total_width:
@@ -361,6 +362,64 @@ def run_pipeline(
                 )
                 continue
 
+            filtered_capped_smiles = []
+            filtered_capped_files = []
+            filtered_monomer_images = []
+            for idx, smile in enumerate(monomer_result.capped_smiles):
+                if smile in seen_capped_smiles:
+                    for path_text in [
+                        monomer_result.capped_files[idx] if idx < len(monomer_result.capped_files) else "",
+                        monomer_result.monomer_images[idx] if idx < len(monomer_result.monomer_images) else "",
+                    ]:
+                        if path_text:
+                            try:
+                                Path(path_text).unlink()
+                            except OSError:
+                                logger.warning("Failed to remove duplicate capped output: %s", path_text)
+                    continue
+                filtered_capped_smiles.append(smile)
+                if idx < len(monomer_result.capped_files):
+                    filtered_capped_files.append(monomer_result.capped_files[idx])
+                if idx < len(monomer_result.monomer_images):
+                    filtered_monomer_images.append(monomer_result.monomer_images[idx])
+
+            monomer_result.capped_smiles = filtered_capped_smiles
+            monomer_result.capped_files = filtered_capped_files
+            monomer_result.monomer_images = filtered_monomer_images
+            if not monomer_result.capped_smiles:
+                logger.info(
+                    "Skip cut plan with only duplicate capped products: k=%s candidate_variant=%s",
+                    k,
+                    next_variant,
+                )
+                _clear_artifact_files(base_name)
+                continue
+
+            renamed_capped_files = []
+            renamed_monomer_images = []
+            temp_pairs = []
+            for file_index, path_text in enumerate(monomer_result.capped_files, start=1):
+                source = Path(path_text)
+                if not source.exists():
+                    continue
+                temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
+                source.rename(temp_path)
+                final_path = SMILE_CAPPED_DIR / f"{base_name}_capped_{file_index}.smi"
+                temp_pairs.append((temp_path, final_path, renamed_capped_files))
+            for file_index, path_text in enumerate(monomer_result.monomer_images, start=1):
+                source = Path(path_text)
+                if not source.exists():
+                    continue
+                temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
+                source.rename(temp_path)
+                final_path = MONOMER_IMG_DIR / f"{base_name}_monomer_{file_index}.png"
+                temp_pairs.append((temp_path, final_path, renamed_monomer_images))
+            for temp_path, final_path, output_list in temp_pairs:
+                temp_path.rename(final_path)
+                output_list.append(str(final_path))
+            monomer_result.capped_files = renamed_capped_files
+            monomer_result.monomer_images = renamed_monomer_images
+
             product_signature = (
                 k,
                 global_plan.top_exit_direction,
@@ -379,6 +438,7 @@ def run_pipeline(
                 _clear_artifact_files(base_name)
                 continue
             seen_product_signatures.add(product_signature)
+            seen_capped_smiles.update(monomer_result.capped_smiles)
 
             variant_count = next_variant
             found_any_global = True

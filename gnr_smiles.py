@@ -82,11 +82,37 @@ def _hexes_form_connected_fused_component(window_hexes: List[BenzeneHex]) -> boo
                 stack.append(nid)
     return len(seen) == len(id_to_index)
 
+def _collect_cut_boundary(
+    original_mol,
+    all_hexes: List[BenzeneHex],
+    cutting_edges: Dict[int, List[Tuple[int, int]]],
+) -> Tuple[set, set]:
+    id_to_hex = {h.id: h for h in all_hexes}
+    cut_hex_ids = set()
+    cut_atom_bonds = set()
+
+    for path in cutting_edges.values():
+        for u, v in path:
+            cut_hex_ids.update([u, v])
+            h1 = id_to_hex.get(u)
+            h2 = id_to_hex.get(v)
+            if not h1 or not h2:
+                continue
+            shared_atoms = sorted(set(h1.atom_indices).intersection(h2.atom_indices))
+            if len(shared_atoms) != 2:
+                continue
+            a1, a2 = shared_atoms
+            if original_mol.GetBondBetweenAtoms(a1, a2):
+                cut_atom_bonds.add(frozenset((a1, a2)))
+
+    return cut_hex_ids, cut_atom_bonds
+
+
 def extract_all_capped_monomers(
     original_mol,
     window_hexes: List[BenzeneHex],
     all_hexes: List[BenzeneHex],
-    removed_hex_ids: set,
+    cut_atom_bonds: set,
     top_exit_direction: str = "",
 ) -> List[Chem.Mol]:
     """
@@ -189,8 +215,8 @@ def extract_all_capped_monomers(
                 n_idx = neighbor.GetIdx()
                 if n_idx in monomer_atom_indices:
                     continue
-                neighbor_hex_ids = {h.id for h in atom_to_hexes.get(n_idx, [])}
-                if neighbor_hex_ids & removed_hex_ids:
+                bond_key = frozenset((u, n_idx))
+                if bond_key in cut_atom_bonds:
                     if is_middle_cut_site(u):
                         cut_bonds.add(u)
                 else:
@@ -297,22 +323,19 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
     if isinstance(global_cutting_plan, GlobalCutPlan):
         top_exit_direction = global_cutting_plan.top_exit_direction or ""
         cutting_edges = global_cutting_plan.cutting_edges
-    
-    removed_hex_ids = set()
-    for path in cutting_edges.values():
-        for (u, v) in path:
-            removed_hex_ids.add(u)
-            removed_hex_ids.add(v)
 
-    kept_hexes = [h for h in all_hexes if h.id not in removed_hex_ids]
-    if not kept_hexes:
-        result.failure_reason = "no kept hexes after cut"
+    cut_boundary_hex_ids, cut_atom_bonds = _collect_cut_boundary(original_mol, all_hexes, cutting_edges)
+    if not cut_atom_bonds:
+        result.failure_reason = "no molecular cut bonds mapped from cut path"
         return result
 
     window_candidates = []
     
     for start_col in range(max_col - k + 1):
-        window_hexes = [h for h in kept_hexes if start_col <= h.col < start_col + k]
+        window_hexes = [
+            h for h in all_hexes
+            if h.id not in cut_boundary_hex_ids and start_col <= h.col < start_col + k
+        ]
         if not window_hexes: continue
         if not _hexes_form_connected_fused_component(window_hexes): continue
 
@@ -371,7 +394,7 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
             original_mol,
             target_window,
             all_hexes,
-            removed_hex_ids,
+            cut_atom_bonds,
             top_exit_direction=top_exit_direction,
         )
         for capped_mol in capped_mols:
@@ -390,6 +413,19 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         return result
     if not capped_results:
         result.failure_reason = "no valid capped monomer smiles generated"
+        return result
+
+    unique_capped_results = []
+    unique_capped_smiles = set()
+    for mol in capped_results:
+        smi = Chem.MolToSmiles(mol)
+        if smi in unique_capped_smiles:
+            continue
+        unique_capped_smiles.add(smi)
+        unique_capped_results.append(mol)
+    capped_results = unique_capped_results
+    if not capped_results:
+        result.failure_reason = "no unique capped monomer smiles generated"
         return result
 
     # 保存文件
