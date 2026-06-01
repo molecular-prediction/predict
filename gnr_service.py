@@ -333,16 +333,14 @@ def run_pipeline(
                 )
                 continue
 
-            variant_count += 1
-            found_any_global = True
-            base_name = f"cut_method_k{k}_v{variant_count}"
+            next_variant = variant_count + 1
+            base_name = f"cut_method_k{k}_v{next_variant}"
             img_path = PHOTO_DIR / f"{base_name}.png"
             raw_smi_path = SMILE_RAW_DIR / f"{base_name}_raw.smi"
             capped_smi_path = SMILE_CAPPED_DIR / f"{base_name}_capped.smi"
             monomer_img_path = MONOMER_IMG_DIR / f"{base_name}_monomer.png"
 
             _clear_artifact_files(base_name)
-            draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
             monomer_result = generate_monomer_smiles_periodic(
                 mol,
                 hexes,
@@ -354,16 +352,17 @@ def run_pipeline(
                 str(monomer_img_path),
             )
             if not monomer_result.is_valid:
-                if monomer_result.failure_reason == "no kept hexes after cut":
-                    _clear_artifact_files(base_name)
-                    variant_count -= 1
-                    continue
                 logger.info(
-                    "Cut plan kept without complete monomer outputs: k=%s variant=%s reason=%s",
+                    "Skip cut plan without complete monomer outputs: k=%s candidate_variant=%s reason=%s",
                     k,
-                    variant_count,
+                    next_variant,
                     monomer_result.failure_reason,
                 )
+                continue
+
+            variant_count = next_variant
+            found_any_global = True
+            draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
 
             if variant_count >= 5:
                 break

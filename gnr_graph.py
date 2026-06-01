@@ -229,9 +229,6 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
     if not expected_tiles:
         plan.invalid_reason = "no complete tiles matching template"
         return plan
-
-    skipped_tiles = []
-    id_map = {h.id: h for hexes in all_tiles.values() for h in hexes}
     
     # 2. 全局应用
     # 遍历每一个 tile 作为起点 tile
@@ -241,13 +238,12 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
         current_coord_map = {(h.row, h.relative_col): h.id for h in tile_hexes}
         
         current_tile_path = []
-        skip_reason = ""
         
         for (r1, c1, r2, c2, shift) in path_signature_with_shift:
             # 起点必须在当前 tile 中
             if (r1, c1) not in current_coord_map:
-                skip_reason = f"tile {tidx} missing start coordinate {(r1, c1)}"
-                break
+                plan.invalid_reason = f"tile {tidx} missing start coordinate {(r1, c1)}"
+                return plan
             u_id = current_coord_map[(r1, c1)]
             
             # 终点可能在 neighbor tile 中
@@ -255,27 +251,27 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
             target_tile_hexes = all_tiles.get(target_tile_idx)
             
             if not target_tile_hexes:
-                skip_reason = f"tile {tidx} missing target tile {target_tile_idx}"
-                break
+                plan.invalid_reason = f"tile {tidx} missing target tile {target_tile_idx}"
+                return plan
                 
             target_coord_map = {(h.row, h.relative_col): h.id for h in target_tile_hexes}
             
             if (r2, c2) not in target_coord_map:
-                skip_reason = f"tile {target_tile_idx} missing target coordinate {(r2, c2)}"
-                break
+                plan.invalid_reason = f"tile {target_tile_idx} missing target coordinate {(r2, c2)}"
+                return plan
                 
             v_id = target_coord_map[(r2, c2)]
             
-            # 模板 DFS 允许周期逻辑邻接；有限分子边界处这些边不一定出现在物理邻接表。
-            current_tile_path.append((u_id, v_id))
-
-        if skip_reason:
-            skipped_tiles.append(skip_reason)
-            continue
+            # 验证物理连通性
+            if v_id in full_adj.get(u_id, []):
+                current_tile_path.append((u_id, v_id))
+            else:
+                plan.invalid_reason = f"tile {tidx} mapped edge {(u_id, v_id)} is not physically adjacent"
+                return plan
 
         if len(current_tile_path) != len(path_signature_with_shift):
-            skipped_tiles.append(f"tile {tidx} mapped incomplete path")
-            continue
+            plan.invalid_reason = f"tile {tidx} mapped incomplete path"
+            return plan
 
         top_start_global = current_coord_map[(top_start.row, top_start.relative_col)]
         top_next_tile = tidx + path_signature_with_shift[0][4]
@@ -289,12 +285,13 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
         bottom_end_global_hex = bottom_end_map.get((bottom_end.row, bottom_end.relative_col))
         bottom_prev_global = current_coord_map[(bottom_prev.row, bottom_prev.relative_col)]
 
+        id_map = {h.id: h for hexes in all_tiles.values() for h in hexes}
         if top_next_global_hex is None or top_start_global not in id_map:
-            skipped_tiles.append(f"tile {tidx} cannot build top endpoint extension")
-            continue
+            plan.invalid_reason = f"tile {tidx} cannot build top endpoint extension"
+            return plan
         if bottom_end_global_hex is None or bottom_prev_global not in id_map:
-            skipped_tiles.append(f"tile {tidx} cannot build bottom endpoint extension")
-            continue
+            plan.invalid_reason = f"tile {tidx} cannot build bottom endpoint extension"
+            return plan
 
         top_start_global_hex = id_map[top_start_global]
         bottom_prev_global_hex = id_map[bottom_prev_global]
@@ -320,9 +317,7 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
         plan.cutting_edges[tidx] = current_tile_path
         plan.complete_tile_count += 1
             
-    plan.is_complete = bool(plan.cutting_edges) and bool(plan.endpoint_extensions)
+    plan.is_complete = plan.complete_tile_count == plan.expected_tile_count and bool(plan.endpoint_extensions)
     if not plan.is_complete:
-        plan.invalid_reason = "global plan did not complete any tile"
-    elif skipped_tiles:
-        plan.invalid_reason = "; ".join(skipped_tiles[:3])
+        plan.invalid_reason = "global plan did not complete all expected tiles"
     return plan
