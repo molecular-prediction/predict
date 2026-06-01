@@ -1,10 +1,14 @@
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from typing import List, Dict, Tuple
-from gnr_types import BenzeneHex
+from gnr_types import BenzeneHex, GlobalCutPlan
 
-def draw_multi_cut_result(all_hexes: List[BenzeneHex], tiles_cutting_edges: Dict[int, List[Tuple[int, int]]], k: int, variant_idx: int, filename: str):
+def draw_multi_cut_result(all_hexes: List[BenzeneHex], tiles_cutting_edges: Dict[int, List[Tuple[int, int]]] | GlobalCutPlan, k: int, variant_idx: int, filename: str):
     fig, ax = plt.subplots(figsize=(12, 5))
+    endpoint_extensions = []
+    if isinstance(tiles_cutting_edges, GlobalCutPlan):
+        endpoint_extensions = tiles_cutting_edges.endpoint_extensions
+        tiles_cutting_edges = tiles_cutting_edges.cutting_edges
 
     all_removed_ids = set()
     for path in tiles_cutting_edges.values():
@@ -23,6 +27,16 @@ def draw_multi_cut_result(all_hexes: List[BenzeneHex], tiles_cutting_edges: Dict
         for (u, v) in path:
             h1, h2 = id_map[u], id_map[v]
             ax.plot([h1.cx, h2.cx], [h1.cy, h2.cy], color='red', linewidth=2.5, zorder=10)
+
+    for extension in endpoint_extensions:
+        ax.plot(
+            [extension.start[0], extension.end[0]],
+            [extension.start[1], extension.end[1]],
+            color='red',
+            linewidth=2.5,
+            zorder=10,
+            linestyle='-',
+        )
 
     ax.set_aspect('equal')
     ax.axis('off')

@@ -1,9 +1,21 @@
 import os
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
-from gnr_types import BenzeneHex
+from gnr_types import BenzeneHex, GlobalCutPlan
 import math
+
+
+@dataclass
+class MonomerGenerationResult:
+    is_valid: bool = False
+    failure_reason: str = ""
+    raw_smiles: List[str] = field(default_factory=list)
+    capped_smiles: List[str] = field(default_factory=list)
+    raw_files: List[str] = field(default_factory=list)
+    capped_files: List[str] = field(default_factory=list)
+    monomer_images: List[str] = field(default_factory=list)
 
 def extract_submol_from_hexes(original_mol, hexes_subset: List[BenzeneHex]):
     """提取原始未封端分子骨架"""
@@ -43,7 +55,13 @@ def get_atom_to_hexes_map(all_hexes: List[BenzeneHex]) -> Dict[int, List[Benzene
             mapping.setdefault(idx, []).append(h)
     return mapping
 
-def extract_all_capped_monomers(original_mol, window_hexes: List[BenzeneHex], all_hexes: List[BenzeneHex], removed_hex_ids: set) -> List[Chem.Mol]:
+def extract_all_capped_monomers(
+    original_mol,
+    window_hexes: List[BenzeneHex],
+    all_hexes: List[BenzeneHex],
+    removed_hex_ids: set,
+    top_exit_direction: str = "",
+) -> List[Chem.Mol]:
     """
     终极化学真理版：
     - Ullmann 主链 (Br) 固定在对角的 Alpha 键（即视觉上的 Top-Right 和 Bottom-Left）。
@@ -119,6 +137,60 @@ def extract_all_capped_monomers(original_mol, window_hexes: List[BenzeneHex], al
         def get_local_y(u):
             return conf.GetAtomPosition(u).y
 
+        atom_to_hexes = get_atom_to_hexes_map(all_hexes)
+        local_x_values = [conf.GetAtomPosition(u).x for u in monomer_atom_indices]
+        local_y_values = [get_local_y(u) for u in monomer_atom_indices]
+        min_local_x = min(local_x_values)
+        max_local_x = max(local_x_values)
+        min_local_y = min(local_y_values)
+        max_local_y = max(local_y_values)
+        local_x_span = max(max_local_x - min_local_x, 1e-6)
+        local_y_span = max(max_local_y - min_local_y, 1e-6)
+
+        def is_middle_cut_site(u):
+            normalized_x = (conf.GetAtomPosition(u).x - min_local_x) / local_x_span
+            normalized_y = (get_local_y(u) - min_local_y) / local_y_span
+            return 0.20 <= normalized_x <= 0.80 and 0.25 <= normalized_y <= 0.75
+
+        cut_bonds = set()
+        boundary_bonds = set()
+        for u in broken_bonds:
+            for neighbor in original_mol.GetAtomWithIdx(u).GetNeighbors():
+                n_idx = neighbor.GetIdx()
+                if n_idx in monomer_atom_indices:
+                    continue
+                neighbor_hex_ids = {h.id for h in atom_to_hexes.get(n_idx, [])}
+                if neighbor_hex_ids & removed_hex_ids:
+                    if is_middle_cut_site(u):
+                        cut_bonds.add(u)
+                else:
+                    boundary_bonds.add(u)
+
+        if not cut_bonds:
+            return []
+
+        selected_boundary_side = "left" if top_exit_direction == "left" else "right"
+        selected_boundary_bonds = left_bonds if selected_boundary_side == "left" else right_bonds
+        selected_boundary_bonds = [u for u in selected_boundary_bonds if u in boundary_bonds]
+        selected_boundary_bonds.sort(key=get_local_y, reverse=True)
+
+        carbon_choices = selected_boundary_bonds or [None]
+        capped_mols = []
+        for carbon_bond in carbon_choices:
+            rw_mol = Chem.RWMol(base_rw_mol)
+            for u in sorted(cut_bonds):
+                cap = rw_mol.AddAtom(Chem.Atom("Br"))
+                rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
+            if carbon_bond is not None:
+                cap = rw_mol.AddAtom(Chem.Atom("C"))
+                rw_mol.AddBond(old_to_new_map[carbon_bond], cap, Chem.BondType.SINGLE)
+            try:
+                Chem.SanitizeMol(rw_mol)
+                capped_mols.append(rw_mol.GetMol())
+            except Exception:
+                pass
+        return capped_mols
+
     # 3. 严格拓扑分类：Alpha连着桥头碳，Beta不连
     def categorize_and_sort(bonds):
         alphas, betas = [], []
@@ -186,18 +258,26 @@ def extract_all_capped_monomers(original_mol, window_hexes: List[BenzeneHex], al
     return capped_mols
 
 def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
-                                     global_cutting_plan: Dict[int, List[Tuple[int, int]]],
+                                     global_cutting_plan: Dict[int, List[Tuple[int, int]]] | GlobalCutPlan,
                                      k: int, max_col: int,
-                                     raw_smi_filename: str, capped_smi_filename: str, img_filename: str):
+                                     raw_smi_filename: str, capped_smi_filename: str, img_filename: str) -> MonomerGenerationResult:
+    result = MonomerGenerationResult()
+    top_exit_direction = ""
+    cutting_edges = global_cutting_plan
+    if isinstance(global_cutting_plan, GlobalCutPlan):
+        top_exit_direction = global_cutting_plan.top_exit_direction or ""
+        cutting_edges = global_cutting_plan.cutting_edges
     
     removed_hex_ids = set()
-    for path in global_cutting_plan.values():
+    for path in cutting_edges.values():
         for (u, v) in path:
             removed_hex_ids.add(u)
             removed_hex_ids.add(v)
 
     kept_hexes = [h for h in all_hexes if h.id not in removed_hex_ids]
-    if not kept_hexes: return
+    if not kept_hexes:
+        result.failure_reason = "no kept hexes after cut"
+        return result
 
     # 只保留 max_atoms 保证骨架完整，去除阻挡不同相位的严苛过滤器
     max_atoms = 0
@@ -218,15 +298,29 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
 
         if num_atoms > max_atoms:
             max_atoms = num_atoms
-            valid_windows = [window_hexes]
+            valid_windows = [(start_col, window_hexes)]
         elif num_atoms == max_atoms:
-            valid_windows.append(window_hexes)
+            valid_windows.append((start_col, window_hexes))
+
+    if not valid_windows:
+        result.failure_reason = "no valid monomer windows generated"
+        return result
+
+    interior_windows = [
+        (start_col, window_hexes)
+        for start_col, window_hexes in valid_windows
+        if start_col > 0 and start_col + k < max_col
+    ]
+    monomer_windows = interior_windows
+    if not monomer_windows:
+        result.failure_reason = "no interior periodic monomer windows generated"
+        return result
 
     unique_raw_smiles = set()
     raw_results = []
     capped_results = []
 
-    for window_hexes in valid_windows:
+    for _start_col, window_hexes in monomer_windows:
         raw_mol_rw = extract_submol_from_hexes(original_mol, window_hexes)
         if raw_mol_rw:
             frags = Chem.GetMolFrags(raw_mol_rw.GetMol(), asMols=True, sanitizeFrags=False)
@@ -240,15 +334,33 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
                         raw_results.append(best_raw_mol)
                 except: pass
 
-    if valid_windows:
-        target_window = valid_windows[0]
-        capped_mols = extract_all_capped_monomers(original_mol, target_window, all_hexes, removed_hex_ids)
+    best_capped_count = 0
+    best_capped_results = []
+    for _start_col, target_window in monomer_windows:
+        capped_mols = extract_all_capped_monomers(
+            original_mol,
+            target_window,
+            all_hexes,
+            removed_hex_ids,
+            top_exit_direction=top_exit_direction,
+        )
         for capped_mol in capped_mols:
             frags = Chem.GetMolFrags(capped_mol, asMols=True, sanitizeFrags=True)
             if frags:
                 best_capped_mol = max(frags, key=lambda m: m.GetNumAtoms())
-                # 直接添加，不进行 SMILES 字符串去重
                 capped_results.append(best_capped_mol)
+        if len(capped_results) > best_capped_count:
+            best_capped_count = len(capped_results)
+            best_capped_results = capped_results
+        capped_results = []
+    capped_results = best_capped_results
+
+    if not raw_results:
+        result.failure_reason = "no valid raw monomer smiles generated"
+        return result
+    if not capped_results:
+        result.failure_reason = "no valid capped monomer smiles generated"
+        return result
 
     # 保存文件
     for idx, mol in enumerate(raw_results):
@@ -257,8 +369,12 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         try:
             with open(out_name, 'w') as f:
                 f.write(smi)
+            result.raw_smiles.append(smi)
+            result.raw_files.append(out_name)
             print(f"    [成功] 原始骨架保存: {os.path.basename(out_name)}")
-        except: pass
+        except Exception as exc:
+            result.failure_reason = f"failed to write raw smiles: {exc}"
+            return result
 
     for idx, mol in enumerate(capped_results):
         smi = Chem.MolToSmiles(mol)
@@ -270,5 +386,15 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
                 f.write(smi)
             AllChem.Compute2DCoords(mol)
             Draw.MolToFile(mol, out_img_name, size=(600, 600))
+            result.capped_smiles.append(smi)
+            result.capped_files.append(out_smi_name)
+            result.monomer_images.append(out_img_name)
             print(f"    [成功] 智能封端保存: {os.path.basename(out_smi_name)} | 图像: {os.path.basename(out_img_name)}")
-        except: pass
+        except Exception as exc:
+            result.failure_reason = f"failed to write capped smiles or image: {exc}"
+            return result
+
+    result.is_valid = bool(result.raw_smiles and result.capped_smiles)
+    if not result.is_valid:
+        result.failure_reason = "monomer output files were incomplete"
+    return result

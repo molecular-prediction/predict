@@ -140,7 +140,7 @@ class EdgeCuttingPathFinder:
                 new_horiz_run = 0
 
             visited.add(nei_id)
-            path.append((min(curr_id, nei_id), max(curr_id, nei_id)))
+            path.append((curr_id, nei_id))
             self._dfs(nei_id, visited, path, covered_rows | {nei_h.row}, new_horiz_run)
             path.pop()
             visited.remove(nei_id)

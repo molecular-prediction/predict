@@ -106,6 +106,35 @@ def _read_smiles_from_file(file_path: Path) -> str:
     return text.splitlines()[0].strip() if text else ""
 
 
+def _clear_artifact_files(base_name: str) -> None:
+    patterns = [
+        PHOTO_DIR / f"{base_name}.png",
+        SMILE_RAW_DIR / f"{base_name}_raw*.smi",
+        SMILE_CAPPED_DIR / f"{base_name}_capped*.smi",
+        MONOMER_IMG_DIR / f"{base_name}_monomer*.png",
+    ]
+    for pattern in patterns:
+        for path in pattern.parent.glob(pattern.name):
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("Failed to remove stale artifact: %s", path)
+
+
+def _clear_previous_cut_outputs() -> None:
+    for directory, pattern in [
+        (PHOTO_DIR, "cut_method_*.png"),
+        (SMILE_RAW_DIR, "cut_method_*.smi"),
+        (SMILE_CAPPED_DIR, "cut_method_*.smi"),
+        (MONOMER_IMG_DIR, "cut_method_*.png"),
+    ]:
+        for path in directory.glob(pattern):
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("Failed to remove previous cut output: %s", path)
+
+
 def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
     artifact_map: Dict[str, OutputArtifact] = {}
 
@@ -262,6 +291,7 @@ def run_pipeline(
     llm_provider: Optional[OpenAILLMProvider] = None,
 ) -> PredictionRun:
     ensure_output_dirs()
+    _clear_previous_cut_outputs()
     start_ts = time.time()
     provider = llm_provider if llm_provider is not None else OpenAILLMProvider.from_env()
     logger.info("Pipeline started: input_file=%s provider=%s", input_file, type(provider).__name__ if provider else "None")
@@ -295,20 +325,23 @@ def run_pipeline(
         variant_count = 0
         for path in all_possible_paths:
             global_plan = apply_path_to_all_tiles(path, template_tile, tiles, all_adj)
-            if not global_plan:
+            if not global_plan.is_complete:
+                logger.info(
+                    "Skip incomplete global cut plan: k=%s reason=%s",
+                    k,
+                    global_plan.invalid_reason,
+                )
                 continue
 
-            variant_count += 1
-            found_any_global = True
-
-            base_name = f"cut_method_k{k}_v{variant_count}"
+            next_variant = variant_count + 1
+            base_name = f"cut_method_k{k}_v{next_variant}"
             img_path = PHOTO_DIR / f"{base_name}.png"
             raw_smi_path = SMILE_RAW_DIR / f"{base_name}_raw.smi"
             capped_smi_path = SMILE_CAPPED_DIR / f"{base_name}_capped.smi"
             monomer_img_path = MONOMER_IMG_DIR / f"{base_name}_monomer.png"
 
-            draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
-            generate_monomer_smiles_periodic(
+            _clear_artifact_files(base_name)
+            monomer_result = generate_monomer_smiles_periodic(
                 mol,
                 hexes,
                 global_plan,
@@ -318,6 +351,18 @@ def run_pipeline(
                 str(capped_smi_path),
                 str(monomer_img_path),
             )
+            if not monomer_result.is_valid:
+                logger.info(
+                    "Skip cut plan without complete monomer outputs: k=%s candidate_variant=%s reason=%s",
+                    k,
+                    next_variant,
+                    monomer_result.failure_reason,
+                )
+                continue
+
+            variant_count = next_variant
+            found_any_global = True
+            draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
 
             if variant_count >= 5:
                 break
