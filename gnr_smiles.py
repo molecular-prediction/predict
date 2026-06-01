@@ -110,6 +110,10 @@ def extract_all_capped_monomers(
         if h1.col > h2.col or (h1.col == h2.col and h1.cx > h2.cx):
             h1, h2 = h2, h1
 
+        bridgeheads = set(h1.atom_indices).intersection(set(h2.atom_indices))
+        if len(bridgeheads) != 2:
+            return []
+
         # 建立局部坐标系
         vec_x = (h2.cx - h1.cx, h2.cy - h1.cy)
         length_x = math.hypot(vec_x[0], vec_x[1]) if math.hypot(vec_x[0], vec_x[1]) > 0 else 1.0
@@ -125,7 +129,6 @@ def extract_all_capped_monomers(
 
         left_bonds = [u for u in broken_bonds if u in h1.atom_indices and u not in h2.atom_indices]
         right_bonds = [u for u in broken_bonds if u in h2.atom_indices and u not in h1.atom_indices]
-        bridgeheads = set(h1.atom_indices).intersection(set(h2.atom_indices))
     else:
         # 保底逻辑 (处理非 K=2 的情况)
         bridgeheads = set(aid for aid in sorted_old_indices if sum(
@@ -279,9 +282,7 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         result.failure_reason = "no kept hexes after cut"
         return result
 
-    # 只保留 max_atoms 保证骨架完整，去除阻挡不同相位的严苛过滤器
-    max_atoms = 0
-    valid_windows = []
+    window_candidates = []
     
     for start_col in range(max_col - k + 1):
         window_hexes = [h for h in kept_hexes if start_col <= h.col < start_col + k]
@@ -295,26 +296,27 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         
         largest_frag = max(frags, key=lambda m: m.GetNumAtoms())
         num_atoms = largest_frag.GetNumAtoms()
+        window_candidates.append((start_col, window_hexes, num_atoms))
 
-        if num_atoms > max_atoms:
-            max_atoms = num_atoms
-            valid_windows = [(start_col, window_hexes)]
-        elif num_atoms == max_atoms:
-            valid_windows.append((start_col, window_hexes))
-
-    if not valid_windows:
+    if not window_candidates:
         result.failure_reason = "no valid monomer windows generated"
         return result
 
-    interior_windows = [
-        (start_col, window_hexes)
-        for start_col, window_hexes in valid_windows
+    interior_candidates = [
+        (start_col, window_hexes, num_atoms)
+        for start_col, window_hexes, num_atoms in window_candidates
         if start_col > 0 and start_col + k < max_col
     ]
-    monomer_windows = interior_windows
-    if not monomer_windows:
+    candidate_pool = interior_candidates
+    if not candidate_pool:
         result.failure_reason = "no interior periodic monomer windows generated"
         return result
+    max_atoms = max(num_atoms for _start_col, _window_hexes, num_atoms in candidate_pool)
+    monomer_windows = [
+        (start_col, window_hexes)
+        for start_col, window_hexes, num_atoms in candidate_pool
+        if num_atoms == max_atoms
+    ]
 
     unique_raw_smiles = set()
     raw_results = []
