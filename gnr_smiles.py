@@ -278,33 +278,26 @@ def extract_all_capped_monomers(
     right_boundary_bonds = [u for u in right_bonds if u in boundary_bonds]
     left_boundary_bonds.sort(key=get_local_y, reverse=True)
     right_boundary_bonds.sort(key=get_local_y, reverse=True)
-    monomer_x_values = [conf.GetAtomPosition(u).x for u in monomer_atom_indices]
     monomer_y_values = [conf.GetAtomPosition(u).y for u in monomer_atom_indices]
-    center_x = (min(monomer_x_values) + max(monomer_x_values)) / 2.0
     center_y = (min(monomer_y_values) + max(monomer_y_values)) / 2.0
-    inversion_tolerance = 0.5
 
-    def is_center_symmetric_pair(first, second):
-        p1 = conf.GetAtomPosition(first)
-        p2 = conf.GetAtomPosition(second)
+    def is_opposite_vertical_boundary_pair(first, second):
         return (
-            abs((p1.x + p2.x) - 2.0 * center_x) <= inversion_tolerance
-            and abs((p1.y + p2.y) - 2.0 * center_y) <= inversion_tolerance
+            (conf.GetAtomPosition(first).y >= center_y)
+            != (conf.GetAtomPosition(second).y >= center_y)
         )
 
     capped_mols = []
     carbon_choices = []
-    if left_boundary_bonds and right_boundary_bonds:
-        for left_bond in left_boundary_bonds:
-            for right_bond in right_boundary_bonds:
-                if is_center_symmetric_pair(left_bond, right_bond):
-                    carbon_choices.append((left_bond, right_bond))
-    else:
-        fallback_boundary_bonds = sorted(boundary_bonds, key=get_local_y, reverse=True)
-        for i, first in enumerate(fallback_boundary_bonds):
-            for second in fallback_boundary_bonds[i + 1:]:
-                if is_center_symmetric_pair(first, second):
-                    carbon_choices.append((first, second))
+    fallback_boundary_bonds = sorted(
+        set(left_boundary_bonds + right_boundary_bonds) or boundary_bonds,
+        key=get_local_y,
+        reverse=True,
+    )
+    for i, first in enumerate(fallback_boundary_bonds):
+        for second in fallback_boundary_bonds[i + 1:]:
+            if is_opposite_vertical_boundary_pair(first, second):
+                carbon_choices.append((first, second))
 
     for carbon_bonds in carbon_choices:
         rw_mol = Chem.RWMol(base_rw_mol)
