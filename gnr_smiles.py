@@ -433,6 +433,16 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
         result.failure_reason = "no dibrominated dimethyl capped monomer smiles generated"
         return result
 
+    unique_capped_results = []
+    unique_capped_smiles = set()
+    for mol in capped_results:
+        smi = Chem.MolToSmiles(mol)
+        if smi in unique_capped_smiles:
+            continue
+        unique_capped_smiles.add(smi)
+        unique_capped_results.append(mol)
+    capped_results = unique_capped_results
+
     # 保存文件。先确认 capped 产物存在，再写 raw，避免留下 raw-only 半成品 artifact。
     for idx, mol in enumerate(raw_results):
         smi = Chem.MolToSmiles(mol)
