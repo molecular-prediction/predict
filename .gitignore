@@ -43,6 +43,7 @@ dist/
 !.env.example
 
 # ===== 临时文件 & 缓存 =====
+/.cache/
 *.swp
 *.swo
 *.tmp

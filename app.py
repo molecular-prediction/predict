@@ -72,12 +72,16 @@ def _artifact_to_view(item):
     }
 
 
+def _render_index(request: Request, context: dict):
+    context = {"request": request, **context}
+    return templates.TemplateResponse(request, "index.html", context)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
+    return _render_index(
+        request,
         {
-            "request": request,
             "result": None,
             "artifacts_view": [],
             "error": None,
@@ -100,10 +104,9 @@ async def run_web(
         elif smile_text.strip():
             saved_input = save_input_smile_file(smile_text.strip())
         else:
-            return templates.TemplateResponse(
-                "index.html",
+            return _render_index(
+                request,
                 {
-                    "request": request,
                     "result": None,
                     "error": "请上传 smile 文件，或者直接输入 smile 码。",
                     "saved_input": None,
@@ -112,10 +115,9 @@ async def run_web(
             )
 
         result = run_pipeline(str(saved_input))
-        return templates.TemplateResponse(
-            "index.html",
+        return _render_index(
+            request,
             {
-                "request": request,
                 "result": result,
                 "artifacts_view": [_artifact_to_view(item) for item in result.artifacts],
                 "error": None,
@@ -124,10 +126,9 @@ async def run_web(
             },
         )
     except Exception as exc:
-        return templates.TemplateResponse(
-            "index.html",
+        return _render_index(
+            request,
             {
-                "request": request,
                 "result": None,
                 "artifacts_view": [],
                 "error": f"运行失败: {exc}",

@@ -1,3 +1,13 @@
+import os
+from pathlib import Path
+
+_CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+(_CACHE_DIR / "matplotlib").mkdir(parents=True, exist_ok=True)
+(_CACHE_DIR / "fontconfig").mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_CACHE_DIR / "matplotlib"))
+os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_DIR))
+os.environ.setdefault("FC_CACHEDIR", str(_CACHE_DIR / "fontconfig"))
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from typing import List, Dict, Tuple
