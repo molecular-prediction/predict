@@ -43,6 +43,7 @@ dist/
 !.env.example
 
 # ===== 临时文件 & 缓存 =====
+/.cache/
 *.swp
 *.swo
 *.tmp
@@ -63,6 +64,5 @@ dist/
 .env.test.local
 .env.production.local
 
-/monomer_imgs/
+AGENTS.md
 /ppt/
-/smile/

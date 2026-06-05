@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from gnr_graph import (
     apply_path_to_all_tiles,
     build_edges_and_adj_geometric,
+    infer_minimal_period_cols,
     mol_to_hex_grid,
     partition_into_tiles,
     read_smiles_and_generate_coords,
@@ -104,6 +105,35 @@ def _read_smiles_from_file(file_path: Path) -> str:
         return ""
     text = file_path.read_text(encoding="utf-8", errors="ignore").strip()
     return text.splitlines()[0].strip() if text else ""
+
+
+def _clear_artifact_files(base_name: str) -> None:
+    patterns = [
+        PHOTO_DIR / f"{base_name}.png",
+        SMILE_RAW_DIR / f"{base_name}_raw*.smi",
+        SMILE_CAPPED_DIR / f"{base_name}_capped*.smi",
+        MONOMER_IMG_DIR / f"{base_name}_monomer*.png",
+    ]
+    for pattern in patterns:
+        for path in pattern.parent.glob(pattern.name):
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("Failed to remove stale artifact: %s", path)
+
+
+def _clear_previous_cut_outputs() -> None:
+    for directory, pattern in [
+        (PHOTO_DIR, "cut_method_*.png"),
+        (SMILE_RAW_DIR, "cut_method_*.smi"),
+        (SMILE_CAPPED_DIR, "cut_method_*.smi"),
+        (MONOMER_IMG_DIR, "cut_method_*.png"),
+    ]:
+        for path in directory.glob(pattern):
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning("Failed to remove previous cut output: %s", path)
 
 
 def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
@@ -256,80 +286,170 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
         )
 
 
-def judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAILLMProvider] = None) -> None:
+def judge_artifacts(
+    artifacts: List[OutputArtifact],
+    provider: Optional[OpenAILLMProvider] = None,
+) -> None:
     active_provider = provider if provider is not None else OpenAILLMProvider.from_env()
     logger.info(
-        "Background judgement started: artifact_count=%s provider=%s",
+        "Judgement started: artifact_count=%s provider=%s",
         len(artifacts),
         type(active_provider).__name__ if active_provider else "None",
     )
     _judge_artifacts(artifacts, active_provider)
-    logger.info("Background judgement finished: artifact_count=%s", len(artifacts))
+    logger.info("Judgement finished: artifact_count=%s", len(artifacts))
 
 
 def run_generation_pipeline(
     input_file: str,
-    max_k_attempts: int = 5,
+    max_k_attempts: Optional[int] = 5,
 ) -> PredictionRun:
     ensure_output_dirs()
+    _clear_previous_cut_outputs()
     start_ts = time.time()
     logger.info("Generation pipeline started: input_file=%s", input_file)
 
     mol = read_smiles_and_generate_coords(input_file)
     hexes, total_width = mol_to_hex_grid(mol)
+    minimal_period_cols = infer_minimal_period_cols(hexes, total_width)
     _edges, all_adj = build_edges_and_adj_geometric(hexes)
 
     found_any_global = False
+    seen_product_signatures = set()
+    max_k = total_width if max_k_attempts is None else min(max_k_attempts, total_width)
+    logger.info(
+        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s",
+        total_width,
+        minimal_period_cols,
+        max_k,
+    )
 
-    for k in range(1, max_k_attempts + 1):
-        if k > total_width:
-            continue
-
+    for k in range(1, max_k + 1):
         tiles = partition_into_tiles(hexes, k_cols=k)
         if not tiles:
             continue
 
-        # 动态寻找具有最完整高度（跨越行数最多）的图块作为模板，而不是死板地取 Tile 0
-        best_tidx = max(tiles.keys(), key=lambda t: len({h.row for h in tiles[t]}))
-        template_tile = tiles[best_tidx]
-
-        if len({h.row for h in template_tile}) <= 1:
-            continue
-
-        template_finder = EdgeCuttingPathFinder(template_tile, all_adj, k_cols=k)
-        all_possible_paths = template_finder.find_all_paths()
-        if not all_possible_paths:
+        max_row_count = max(len({h.row for h in tile_hexes}) for tile_hexes in tiles.values())
+        if max_row_count <= 1:
             continue
 
         variant_count = 0
-        for path in all_possible_paths:
-            global_plan = apply_path_to_all_tiles(path, template_tile, tiles, all_adj)
-            if not global_plan:
+        template_tiles = [
+            tile_hexes
+            for _tidx, tile_hexes in sorted(tiles.items())
+            if len({h.row for h in tile_hexes}) == max_row_count
+            and min(h.col for h in tile_hexes) < minimal_period_cols
+        ]
+
+        for template_tile in template_tiles:
+            template_hex_by_id = {h.id: h for h in template_tile}
+            template_finder = EdgeCuttingPathFinder(template_tile, all_adj, k_cols=k)
+            all_possible_paths = template_finder.find_all_paths()
+            if not all_possible_paths:
                 continue
 
-            variant_count += 1
-            found_any_global = True
+            for path in all_possible_paths:
+                relative_path_signature = []
+                for u, v in path:
+                    h1 = template_hex_by_id.get(u)
+                    h2 = template_hex_by_id.get(v)
+                    if h1 is None or h2 is None:
+                        continue
+                    diff = h2.relative_col - h1.relative_col
+                    shift = 0
+                    if diff > 1.5:
+                        shift = -1
+                    elif diff < -1.5:
+                        shift = 1
+                    relative_path_signature.append(
+                        (h1.row, h1.relative_col, h2.row, h2.relative_col, shift)
+                    )
+                relative_path_signature = tuple(relative_path_signature)
 
-            base_name = f"cut_method_k{k}_v{variant_count}"
-            img_path = PHOTO_DIR / f"{base_name}.png"
-            raw_smi_path = SMILE_RAW_DIR / f"{base_name}_raw.smi"
-            capped_smi_path = SMILE_CAPPED_DIR / f"{base_name}_capped.smi"
-            monomer_img_path = MONOMER_IMG_DIR / f"{base_name}_monomer.svg"
+                global_plan = apply_path_to_all_tiles(path, template_tile, tiles, all_adj)
+                if not global_plan.is_complete:
+                    logger.info(
+                        "Skip incomplete global cut plan: k=%s reason=%s",
+                        k,
+                        global_plan.invalid_reason,
+                    )
+                    continue
 
-            draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
-            generate_monomer_smiles_periodic(
-                mol,
-                hexes,
-                global_plan,
-                k,
-                total_width,
-                str(raw_smi_path),
-                str(capped_smi_path),
-                str(monomer_img_path),
-            )
+                next_variant = variant_count + 1
+                base_name = f"cut_method_k{k}_v{next_variant}"
+                img_path = PHOTO_DIR / f"{base_name}.png"
+                raw_smi_path = SMILE_RAW_DIR / f"{base_name}_raw.smi"
+                capped_smi_path = SMILE_CAPPED_DIR / f"{base_name}_capped.smi"
+                monomer_img_path = MONOMER_IMG_DIR / f"{base_name}_monomer.png"
 
-            if variant_count >= 5:
-                break
+                _clear_artifact_files(base_name)
+                monomer_result = generate_monomer_smiles_periodic(
+                    mol,
+                    hexes,
+                    global_plan,
+                    k,
+                    total_width,
+                    str(raw_smi_path),
+                    str(capped_smi_path),
+                    str(monomer_img_path),
+                )
+                if not monomer_result.is_valid:
+                    logger.info(
+                        "Skip cut plan without complete monomer outputs: k=%s candidate_variant=%s reason=%s",
+                        k,
+                        next_variant,
+                        monomer_result.failure_reason,
+                    )
+                    continue
+
+                product_signature = (
+                    k,
+                    tuple(sorted(monomer_result.raw_smiles)),
+                )
+                if product_signature in seen_product_signatures:
+                    logger.info(
+                        "Skip duplicate cut product: k=%s candidate_variant=%s top=%s bottom=%s",
+                        k,
+                        next_variant,
+                        global_plan.top_exit_direction,
+                        global_plan.bottom_exit_direction,
+                    )
+                    _clear_artifact_files(base_name)
+                    continue
+                seen_product_signatures.add(product_signature)
+
+                if monomer_result.capped_smiles:
+                    renamed_capped_files = []
+                    renamed_monomer_images = []
+                    temp_pairs = []
+                    for file_index, path_text in enumerate(monomer_result.capped_files, start=1):
+                        source = Path(path_text)
+                        if not source.exists():
+                            continue
+                        temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
+                        source.rename(temp_path)
+                        final_path = SMILE_CAPPED_DIR / f"{base_name}_capped_{file_index}.smi"
+                        temp_pairs.append((temp_path, final_path, renamed_capped_files))
+                    for file_index, path_text in enumerate(monomer_result.monomer_images, start=1):
+                        source = Path(path_text)
+                        if not source.exists():
+                            continue
+                        temp_path = source.with_name(f"{source.stem}.dedupe_tmp{source.suffix}")
+                        source.rename(temp_path)
+                        final_path = MONOMER_IMG_DIR / f"{base_name}_monomer_{file_index}.png"
+                        temp_pairs.append((temp_path, final_path, renamed_monomer_images))
+                    for temp_path, final_path, output_list in temp_pairs:
+                        temp_path.rename(final_path)
+                        output_list.append(str(final_path))
+                    monomer_result.capped_files = renamed_capped_files
+                    monomer_result.monomer_images = renamed_monomer_images
+
+                variant_count = next_variant
+                found_any_global = True
+                draw_multi_cut_result(hexes, global_plan, k, variant_count, str(img_path))
+
+        if variant_count == 0:
+            logger.info("No valid cut variants accepted for k=%s", k)
 
     artifacts = _collect_outputs_since(start_ts)
     message = "全部完成" if found_any_global else "未找到任何有效的切割方案"
@@ -354,7 +474,7 @@ def run_generation_pipeline(
 
 def run_pipeline(
     input_file: str,
-    max_k_attempts: int = 5,
+    max_k_attempts: Optional[int] = 5,
     llm_provider: Optional[OpenAILLMProvider] = None,
 ) -> PredictionRun:
     result = run_generation_pipeline(input_file, max_k_attempts=max_k_attempts)

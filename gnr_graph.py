@@ -3,7 +3,7 @@ import math
 from typing import List, Tuple, Dict
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from gnr_types import BenzeneHex, Edge
+from gnr_types import BenzeneHex, CutExtension, Edge, GlobalCutPlan
 
 def read_smiles_and_generate_coords(file_path: str):
     if not os.path.exists(file_path):
@@ -52,10 +52,11 @@ def mol_to_hex_grid(mol) -> Tuple[List[BenzeneHex], int]:
             "vertices": atom_coords
         })
 
+    avg_ring_size = sum(ring["size"] for ring in raw_rings) / len(raw_rings)
     sorted_by_y = sorted(raw_rings, key=lambda x: x['cy'], reverse=True)
     rows = []
     current_row = [sorted_by_y[0]]
-    Y_THRESHOLD = 0.5
+    Y_THRESHOLD = avg_ring_size * 0.55
     for ring in sorted_by_y[1:]:
         if abs(ring['cy'] - current_row[0]['cy']) < Y_THRESHOLD:
             current_row.append(ring)
@@ -108,10 +109,62 @@ def partition_into_tiles(hexes: List[BenzeneHex], k_cols: int) -> Dict[int, List
         groups.setdefault(tile_index, []).append(h)
     return groups
 
+
+def infer_minimal_period_cols(hexes: List[BenzeneHex], total_width: int) -> int:
+    if total_width <= 1:
+        return max(total_width, 1)
+
+    row_counts_by_col = []
+    for col in range(total_width):
+        rows = sorted(h.row for h in hexes if h.col == col)
+        row_counts_by_col.append(tuple(rows))
+
+    for period in range(1, total_width + 1):
+        if total_width % period != 0:
+            continue
+        ok = True
+        for col in range(total_width):
+            if row_counts_by_col[col] != row_counts_by_col[col % period]:
+                ok = False
+                break
+        if ok:
+            return period
+    return total_width
+
+
+def _direction_from_dx(dx: float) -> str:
+    return "right" if dx >= 0 else "left"
+
+
+def _extension_from_hexes(
+    tile_index: int,
+    edge: str,
+    direction: str,
+    endpoint_hex: BenzeneHex,
+    neighbor_hex: BenzeneHex,
+) -> CutExtension:
+    if edge == "top":
+        dx = endpoint_hex.cx - neighbor_hex.cx
+        dy = endpoint_hex.cy - neighbor_hex.cy
+    else:
+        dx = endpoint_hex.cx - neighbor_hex.cx
+        dy = endpoint_hex.cy - neighbor_hex.cy
+
+    length = math.hypot(dx, dy) or 1.0
+    scale = max(endpoint_hex.size * 1.3, length * 0.85) / length
+    end = (endpoint_hex.cx + dx * scale, endpoint_hex.cy + dy * scale)
+    return CutExtension(
+        tile_index=tile_index,
+        edge=edge,
+        direction=direction,
+        start=(endpoint_hex.cx, endpoint_hex.cy),
+        end=end,
+    )
+
 def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
                             template_tile: List[BenzeneHex],
                             all_tiles: Dict[int, List[BenzeneHex]],
-                            full_adj: Dict[int, List[int]]) -> Dict[int, List[Tuple[int, int]]]:
+                            full_adj: Dict[int, List[int]]) -> GlobalCutPlan:
     """
     将模板路径应用到所有图块，支持跨图块（周期性）连接。
     核心逻辑：
@@ -119,6 +172,7 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
     2. 如果模板中 u->v 是跨越边界的（例如从左边缘跳到右边缘），
        则在全局应用时，连接 Tile[i] 的 u 和 Tile[i + shift] 的 v。
     """
+    plan = GlobalCutPlan()
     id_to_hex_template = {h.id: h for h in template_tile}
     
     # 1. 解析路径签名，包含 shift 信息
@@ -127,9 +181,46 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
     
     # 获取K值（通过模板的最大相对列推断，或者假设满填充）
     # 更稳妥的是通过 template_tile 计算
-    if not template_tile: return {}
+    if not template_tile:
+        plan.invalid_reason = "empty template tile"
+        return plan
+    if not template_path:
+        plan.invalid_reason = "empty template path"
+        return plan
+
     max_rel_col = max(h.relative_col for h in template_tile)
-    k_cols = max_rel_col + 1 # 近似值，用于启发式判断
+    k_cols = max_rel_col + 1
+
+    top_start_id = template_path[0][0]
+    top_next_id = template_path[0][1]
+    bottom_prev_id = template_path[-1][0]
+    bottom_end_id = template_path[-1][1]
+    if any(node_id not in id_to_hex_template for node_id in [top_start_id, top_next_id, bottom_prev_id, bottom_end_id]):
+        plan.invalid_reason = "template path contains ids outside template tile"
+        return plan
+
+    top_start = id_to_hex_template[top_start_id]
+    top_next = id_to_hex_template[top_next_id]
+    bottom_prev = id_to_hex_template[bottom_prev_id]
+    bottom_end = id_to_hex_template[bottom_end_id]
+    top_row = min(h.row for h in template_tile)
+    bottom_row = max(h.row for h in template_tile)
+    if top_start.row != top_row:
+        plan.invalid_reason = "template path does not start on top row"
+        return plan
+    if bottom_end.row != bottom_row:
+        plan.invalid_reason = "template path does not end on bottom row"
+        return plan
+    top_dx = top_start.cx - top_next.cx
+    bottom_dx = bottom_end.cx - bottom_prev.cx
+    if abs(top_dx) < 1e-6:
+        plan.invalid_reason = "top endpoint has no left/right exit direction"
+        return plan
+    if abs(bottom_dx) < 1e-6:
+        plan.invalid_reason = "bottom endpoint has no left/right exit direction"
+        return plan
+    plan.top_exit_direction = _direction_from_dx(top_dx)
+    plan.bottom_exit_direction = _direction_from_dx(bottom_dx)
     
     for (u, v) in template_path:
         h1 = id_to_hex_template[u]
@@ -150,21 +241,34 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
             
         path_signature_with_shift.append((h1.row, h1.relative_col, h2.row, h2.relative_col, shift))
 
-    global_cutting_plan = {}
+    template_coords = {(h.row, h.relative_col) for h in template_tile}
+    expected_tiles = []
+    for tidx, tile_hexes in all_tiles.items():
+        tile_coords = {(h.row, h.relative_col) for h in tile_hexes}
+        if template_coords.issubset(tile_coords):
+            expected_tiles.append(tidx)
+
+    plan.expected_tile_count = len(expected_tiles)
+    if not expected_tiles:
+        plan.invalid_reason = "no complete tiles matching template"
+        return plan
+    skipped_tiles = []
+    id_map = {h.id: h for hexes in all_tiles.values() for h in hexes}
     
     # 2. 全局应用
     # 遍历每一个 tile 作为起点 tile
-    for tidx, tile_hexes in all_tiles.items():
+    for tidx in sorted(expected_tiles):
+        tile_hexes = all_tiles[tidx]
         # 建立当前 tile 的坐标映射 (row, rel_col) -> global_id
         current_coord_map = {(h.row, h.relative_col): h.id for h in tile_hexes}
         
         current_tile_path = []
-        valid_path_for_this_tile = True
+        skip_reason = ""
         
         for (r1, c1, r2, c2, shift) in path_signature_with_shift:
             # 起点必须在当前 tile 中
             if (r1, c1) not in current_coord_map:
-                valid_path_for_this_tile = False
+                skip_reason = f"tile {tidx} missing start coordinate {(r1, c1)}"
                 break
             u_id = current_coord_map[(r1, c1)]
             
@@ -173,17 +277,14 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
             target_tile_hexes = all_tiles.get(target_tile_idx)
             
             if not target_tile_hexes:
-                # 如果目标 tile 不存在（比如边缘），则跳过这一条边，还是视为非法？
-                # 对于无限延伸的模拟，如果切出界了，通常就不切了（或者该链条在此断开）。
-                # 为了保持严谨，如果连不上，我们这里视为断开，不添加该边。
-                # 但不应该让整个 plan 失败，只是这一条边没有了。
-                continue
+                skip_reason = f"tile {tidx} missing target tile {target_tile_idx}"
+                break
                 
             target_coord_map = {(h.row, h.relative_col): h.id for h in target_tile_hexes}
             
             if (r2, c2) not in target_coord_map:
-                # 目标点在目标 tile 里没有（可能形状不规则）
-                continue
+                skip_reason = f"tile {target_tile_idx} missing target coordinate {(r2, c2)}"
+                break
                 
             v_id = target_coord_map[(r2, c2)]
             
@@ -191,11 +292,63 @@ def apply_path_to_all_tiles(template_path: List[Tuple[int, int]],
             if v_id in full_adj.get(u_id, []):
                 current_tile_path.append((u_id, v_id))
             else:
-                # 逻辑上应该连通但物理上不连通？可能是距离阈值问题，或者判断失误
-                # 这里做个保险
-                pass
+                skip_reason = f"tile {tidx} mapped edge {(u_id, v_id)} is not physically adjacent"
+                break
 
-        if current_tile_path:
-            global_cutting_plan[tidx] = current_tile_path
+        if skip_reason:
+            skipped_tiles.append(skip_reason)
+            continue
+
+        if len(current_tile_path) != len(path_signature_with_shift):
+            skipped_tiles.append(f"tile {tidx} mapped incomplete path")
+            continue
+
+        top_start_global = current_coord_map[(top_start.row, top_start.relative_col)]
+        top_next_tile = tidx + path_signature_with_shift[0][4]
+        top_next_hexes = all_tiles.get(top_next_tile, [])
+        top_next_map = {(h.row, h.relative_col): h for h in top_next_hexes}
+        top_next_global_hex = top_next_map.get((top_next.row, top_next.relative_col))
+
+        bottom_end_tile = tidx + path_signature_with_shift[-1][4]
+        bottom_end_hexes = all_tiles.get(bottom_end_tile, [])
+        bottom_end_map = {(h.row, h.relative_col): h for h in bottom_end_hexes}
+        bottom_end_global_hex = bottom_end_map.get((bottom_end.row, bottom_end.relative_col))
+        bottom_prev_global = current_coord_map[(bottom_prev.row, bottom_prev.relative_col)]
+
+        if top_next_global_hex is None or top_start_global not in id_map:
+            skipped_tiles.append(f"tile {tidx} cannot build top endpoint extension")
+            continue
+        if bottom_end_global_hex is None or bottom_prev_global not in id_map:
+            skipped_tiles.append(f"tile {tidx} cannot build bottom endpoint extension")
+            continue
+
+        top_start_global_hex = id_map[top_start_global]
+        bottom_prev_global_hex = id_map[bottom_prev_global]
+        plan.endpoint_extensions.append(
+            _extension_from_hexes(
+                tidx,
+                "top",
+                plan.top_exit_direction or "",
+                top_start_global_hex,
+                top_next_global_hex,
+            )
+        )
+        plan.endpoint_extensions.append(
+            _extension_from_hexes(
+                tidx,
+                "bottom",
+                plan.bottom_exit_direction or "",
+                bottom_end_global_hex,
+                bottom_prev_global_hex,
+            )
+        )
+
+        plan.cutting_edges[tidx] = current_tile_path
+        plan.complete_tile_count += 1
             
-    return global_cutting_plan
+    plan.is_complete = bool(plan.cutting_edges) and bool(plan.endpoint_extensions)
+    if not plan.is_complete:
+        plan.invalid_reason = "global plan did not complete any tile"
+    elif skipped_tiles:
+        plan.invalid_reason = "; ".join(skipped_tiles[:3])
+    return plan
