@@ -13,6 +13,81 @@ from matplotlib.patches import Polygon
 from typing import List, Dict, Tuple
 from gnr_types import BenzeneHex, GlobalCutPlan
 
+
+def _estimate_tile_width(all_hexes: List[BenzeneHex], k: int) -> float:
+    """Estimate the horizontal period used only to unwrap periodic cut lines."""
+    by_coord = {(h.row, h.col): h for h in all_hexes}
+    widths = []
+    for h in all_hexes:
+        counterpart = by_coord.get((h.row, h.col + k))
+        if counterpart is not None:
+            widths.append(counterpart.cx - h.cx)
+    if widths:
+        widths.sort()
+        return widths[len(widths) // 2]
+
+    xs = sorted({round(h.cx, 6) for h in all_hexes})
+    if len(xs) < 2:
+        return 0.0
+    spacings = [b - a for a, b in zip(xs, xs[1:]) if b > a]
+    if not spacings:
+        return 0.0
+    spacings.sort()
+    return spacings[len(spacings) // 2] * k
+
+
+def _unwrap_path_segments(
+    path: List[Tuple[int, int]],
+    id_map: Dict[int, BenzeneHex],
+    tile_width: float,
+) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    if not path:
+        return []
+
+    unwrapped = []
+    previous_end = None
+    for u, v in path:
+        h1, h2 = id_map[u], id_map[v]
+        start = (h1.cx, h1.cy)
+        end = (h2.cx, h2.cy)
+
+        if previous_end is not None and abs(tile_width) > 1e-6:
+            best_shift = min(
+                range(-4, 5),
+                key=lambda shift: (
+                    start[0] + shift * tile_width - previous_end[0]
+                ) ** 2 + (start[1] - previous_end[1]) ** 2,
+            )
+            start = (start[0] + best_shift * tile_width, start[1])
+            end = (end[0] + best_shift * tile_width, end[1])
+
+        unwrapped.append((start, end))
+        previous_end = end
+
+    return unwrapped
+
+
+def _shift_segment_near(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    target: Tuple[float, float],
+    tile_width: float,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    if abs(tile_width) <= 1e-6:
+        return start, end
+
+    best_shift = min(
+        range(-4, 5),
+        key=lambda shift: (
+            start[0] + shift * tile_width - target[0]
+        ) ** 2 + (start[1] - target[1]) ** 2,
+    )
+    return (
+        (start[0] + best_shift * tile_width, start[1]),
+        (end[0] + best_shift * tile_width, end[1]),
+    )
+
+
 def draw_multi_cut_result(all_hexes: List[BenzeneHex], tiles_cutting_edges: Dict[int, List[Tuple[int, int]]] | GlobalCutPlan, k: int, variant_idx: int, filename: str):
     fig, ax = plt.subplots(figsize=(12, 5))
     endpoint_extensions = []
@@ -33,15 +108,22 @@ def draw_multi_cut_result(all_hexes: List[BenzeneHex], tiles_cutting_edges: Dict
         ax.add_patch(poly)
 
     id_map = {h.id: h for h in all_hexes}
+    tile_width = _estimate_tile_width(all_hexes, k)
+    unwrapped_paths = {}
     for tile_idx, path in tiles_cutting_edges.items():
-        for (u, v) in path:
-            h1, h2 = id_map[u], id_map[v]
-            ax.plot([h1.cx, h2.cx], [h1.cy, h2.cy], color='red', linewidth=2.5, zorder=10)
+        unwrapped_paths[tile_idx] = _unwrap_path_segments(path, id_map, tile_width)
+        for start, end in unwrapped_paths[tile_idx]:
+            ax.plot([start[0], end[0]], [start[1], end[1]], color='red', linewidth=2.5, zorder=10)
 
     for extension in endpoint_extensions:
+        start, end = extension.start, extension.end
+        path_segments = unwrapped_paths.get(extension.tile_index, [])
+        if path_segments:
+            target = path_segments[0][0] if extension.edge == "top" else path_segments[-1][1]
+            start, end = _shift_segment_near(start, end, target, tile_width)
         ax.plot(
-            [extension.start[0], extension.end[0]],
-            [extension.start[1], extension.end[1]],
+            [start[0], end[0]],
+            [start[1], end[1]],
             color='red',
             linewidth=2.5,
             zorder=10,

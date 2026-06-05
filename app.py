@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,7 +18,8 @@ from gnr_service import (
     SMILE_RAW_DIR,
     clean_pycache,
     ensure_output_dirs,
-    run_pipeline,
+    judge_artifacts,
+    run_generation_pipeline,
     save_input_smile_file,
     save_uploaded_smile_file,
 )
@@ -72,9 +73,12 @@ def _artifact_to_view(item):
     }
 
 
+def _judge_artifacts_background(artifacts):
+    judge_artifacts(artifacts)
+
+
 def _render_index(request: Request, context: dict):
-    context = {"request": request, **context}
-    return templates.TemplateResponse(request, "index.html", context)
+    return templates.TemplateResponse(request, "index.html", {"request": request, **context})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -87,6 +91,7 @@ def index(request: Request):
             "error": None,
             "saved_input": None,
             "input_smiles": "",
+            "judging_async": False,
         },
     )
 
@@ -94,6 +99,7 @@ def index(request: Request):
 @app.post("/run", response_class=HTMLResponse)
 async def run_web(
     request: Request,
+    background_tasks: BackgroundTasks,
     smile_text: str = Form(default=""),
     smile_file: Optional[UploadFile] = File(default=None),
 ):
@@ -108,13 +114,16 @@ async def run_web(
                 request,
                 {
                     "result": None,
+                    "artifacts_view": [],
                     "error": "请上传 smile 文件，或者直接输入 smile 码。",
                     "saved_input": None,
                     "input_smiles": "",
+                    "judging_async": False,
                 },
             )
 
-        result = run_pipeline(str(saved_input))
+        result = run_generation_pipeline(str(saved_input))
+        background_tasks.add_task(_judge_artifacts_background, result.artifacts)
         return _render_index(
             request,
             {
@@ -123,6 +132,7 @@ async def run_web(
                 "error": None,
                 "saved_input": str(saved_input),
                 "input_smiles": result.input_smiles,
+                "judging_async": True,
             },
         )
     except Exception as exc:
@@ -134,6 +144,7 @@ async def run_web(
                 "error": f"运行失败: {exc}",
                 "saved_input": None,
                 "input_smiles": smile_text.strip(),
+                "judging_async": False,
             },
         )
     finally:

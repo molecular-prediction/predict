@@ -286,16 +286,28 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
         )
 
 
-def run_pipeline(
+def judge_artifacts(
+    artifacts: List[OutputArtifact],
+    provider: Optional[OpenAILLMProvider] = None,
+) -> None:
+    active_provider = provider if provider is not None else OpenAILLMProvider.from_env()
+    logger.info(
+        "Judgement started: artifact_count=%s provider=%s",
+        len(artifacts),
+        type(active_provider).__name__ if active_provider else "None",
+    )
+    _judge_artifacts(artifacts, active_provider)
+    logger.info("Judgement finished: artifact_count=%s", len(artifacts))
+
+
+def run_generation_pipeline(
     input_file: str,
     max_k_attempts: Optional[int] = 5,
-    llm_provider: Optional[OpenAILLMProvider] = None,
 ) -> PredictionRun:
     ensure_output_dirs()
     _clear_previous_cut_outputs()
     start_ts = time.time()
-    provider = llm_provider if llm_provider is not None else OpenAILLMProvider.from_env()
-    logger.info("Pipeline started: input_file=%s provider=%s", input_file, type(provider).__name__ if provider else "None")
+    logger.info("Generation pipeline started: input_file=%s", input_file)
 
     mol = read_smiles_and_generate_coords(input_file)
     hexes, total_width = mol_to_hex_grid(mol)
@@ -440,10 +452,9 @@ def run_pipeline(
             logger.info("No valid cut variants accepted for k=%s", k)
 
     artifacts = _collect_outputs_since(start_ts)
-    _judge_artifacts(artifacts, provider)
     message = "全部完成" if found_any_global else "未找到任何有效的切割方案"
     logger.info(
-        "Pipeline finished: input_file=%s found_any_global=%s artifact_count=%s message=%s",
+        "Generation pipeline finished: input_file=%s found_any_global=%s artifact_count=%s message=%s",
         input_file,
         found_any_global,
         len(artifacts),
@@ -459,3 +470,13 @@ def run_pipeline(
         artifacts=artifacts,
         message=message,
     )
+
+
+def run_pipeline(
+    input_file: str,
+    max_k_attempts: Optional[int] = 5,
+    llm_provider: Optional[OpenAILLMProvider] = None,
+) -> PredictionRun:
+    result = run_generation_pipeline(input_file, max_k_attempts=max_k_attempts)
+    judge_artifacts(result.artifacts, llm_provider)
+    return result

@@ -251,20 +251,37 @@ def extract_all_capped_monomers(
                     pass
         return capped_mols
 
-    cx = sum(conf.GetAtomPosition(idx).x for idx in broken_bonds) / len(broken_bonds)
-    left_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x < cx]
-    right_bonds = [u for u in broken_bonds if conf.GetAtomPosition(u).x >= cx]
-
     def get_local_y(u):
         return conf.GetAtomPosition(u).y
 
+    window_cols = [h.col for h in window_hexes]
+    min_window_col = min(window_cols)
+    max_window_col = max(window_cols)
+
     cut_bonds = set()
     boundary_bonds = set()
+    external_neighbors = {}
+    atom_to_cols = {}
+    for h in all_hexes:
+        for atom_idx in h.atom_indices:
+            atom_to_cols.setdefault(atom_idx, set()).add(h.col)
+
+    def get_periodic_side(u):
+        neighbor_idx = external_neighbors.get(u)
+        neighbor_cols = atom_to_cols.get(neighbor_idx, set())
+        if neighbor_cols:
+            if max(neighbor_cols) < min_window_col:
+                return "left"
+            if min(neighbor_cols) > max_window_col:
+                return "right"
+        return ""
+
     for u in broken_bonds:
         for neighbor in original_mol.GetAtomWithIdx(u).GetNeighbors():
             n_idx = neighbor.GetIdx()
             if n_idx in monomer_atom_indices:
                 continue
+            external_neighbors[u] = n_idx
             bond_key = frozenset((u, n_idx))
             if bond_key in cut_atom_bonds:
                 cut_bonds.add(u)
@@ -274,44 +291,120 @@ def extract_all_capped_monomers(
     if not cut_bonds:
         return []
 
-    left_boundary_bonds = [u for u in left_bonds if u in boundary_bonds]
-    right_boundary_bonds = [u for u in right_bonds if u in boundary_bonds]
+    left_cut_bonds = [u for u in cut_bonds if get_periodic_side(u) == "left"]
+    right_cut_bonds = [u for u in cut_bonds if get_periodic_side(u) == "right"]
+    left_cut_bonds.sort(key=get_local_y, reverse=True)
+    right_cut_bonds.sort(key=get_local_y, reverse=True)
+
+    left_boundary_bonds = [u for u in boundary_bonds if get_periodic_side(u) == "left"]
+    right_boundary_bonds = [u for u in boundary_bonds if get_periodic_side(u) == "right"]
     left_boundary_bonds.sort(key=get_local_y, reverse=True)
     right_boundary_bonds.sort(key=get_local_y, reverse=True)
-    monomer_y_values = [conf.GetAtomPosition(u).y for u in monomer_atom_indices]
-    center_y = (min(monomer_y_values) + max(monomer_y_values)) / 2.0
 
-    def is_opposite_vertical_boundary_pair(first, second):
-        return (
-            (conf.GetAtomPosition(first).y >= center_y)
-            != (conf.GetAtomPosition(second).y >= center_y)
+    def coupling_pair_score(left_bond, right_bond):
+        left_neighbor = external_neighbors.get(left_bond)
+        right_neighbor = external_neighbors.get(right_bond)
+        score = 0.0
+        if right_neighbor is not None:
+            score += abs(get_local_y(left_bond) - get_local_y(right_neighbor))
+        if left_neighbor is not None:
+            score += abs(get_local_y(right_bond) - get_local_y(left_neighbor))
+        return score
+
+    def pair_periodic_counterparts(left_bonds, right_bonds):
+        candidates = sorted(
+            (
+                (coupling_pair_score(left, right), left, right)
+                for left in left_bonds
+                for right in right_bonds
+            ),
+            key=lambda item: item[0],
         )
+        pairs = []
+        used_left = set()
+        used_right = set()
+        for _score, left, right in candidates:
+            if left in used_left or right in used_right:
+                continue
+            pairs.append((left, right))
+            used_left.add(left)
+            used_right.add(right)
+        return pairs
+
+    br_pairs = []
+    if left_cut_bonds and right_cut_bonds:
+        br_pairs.extend(pair_periodic_counterparts(left_cut_bonds, right_cut_bonds))
+    elif left_cut_bonds and right_boundary_bonds:
+        br_pairs.extend(pair_periodic_counterparts(left_cut_bonds, right_boundary_bonds))
+    elif right_cut_bonds and left_boundary_bonds:
+        br_pairs.extend(pair_periodic_counterparts(left_boundary_bonds, right_cut_bonds))
+    br_pairs = list(dict.fromkeys(tuple(pair) for pair in br_pairs))
+
+    if not br_pairs:
+        return []
 
     capped_mols = []
-    carbon_choices = []
-    fallback_boundary_bonds = sorted(
-        set(left_boundary_bonds + right_boundary_bonds) or boundary_bonds,
-        key=get_local_y,
-        reverse=True,
-    )
-    for i, first in enumerate(fallback_boundary_bonds):
-        for second in fallback_boundary_bonds[i + 1:]:
-            if is_opposite_vertical_boundary_pair(first, second):
-                carbon_choices.append((first, second))
+    top_row = min(h.row for h in window_hexes)
+    bottom_row = max(h.row for h in window_hexes)
+    top_hexes = [h for h in window_hexes if h.row == top_row]
+    bottom_hexes = [h for h in window_hexes if h.row == bottom_row]
 
-    for carbon_bonds in carbon_choices:
-        rw_mol = Chem.RWMol(base_rw_mol)
-        for u in sorted(cut_bonds):
-            cap = rw_mol.AddAtom(Chem.Atom("Br"))
-            rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
-        for carbon_bond in carbon_bonds:
-            cap = rw_mol.AddAtom(Chem.Atom("C"))
-            rw_mol.AddBond(old_to_new_map[carbon_bond], cap, Chem.BondType.SINGLE)
-        try:
-            Chem.SanitizeMol(rw_mol)
-            capped_mols.append(rw_mol.GetMol())
-        except Exception:
-            pass
+    def is_top_second_row_atom(atom_idx):
+        for h in top_hexes:
+            if atom_idx not in h.atom_indices:
+                continue
+            ranked_atoms = sorted(
+                h.atom_indices,
+                key=lambda idx: conf.GetAtomPosition(idx).y,
+                reverse=True,
+            )
+            if atom_idx in ranked_atoms[1:3]:
+                return True
+        return False
+
+    def is_bottom_penultimate_row_atom(atom_idx):
+        for h in bottom_hexes:
+            if atom_idx not in h.atom_indices:
+                continue
+            ranked_atoms = sorted(
+                h.atom_indices,
+                key=lambda idx: conf.GetAtomPosition(idx).y,
+            )
+            if atom_idx in ranked_atoms[1:3]:
+                return True
+        return False
+
+    top_carbon_bonds = sorted(
+        [u for u in boundary_bonds if is_top_second_row_atom(u)],
+        key=lambda u: conf.GetAtomPosition(u).x,
+    )
+    bottom_carbon_bonds = sorted(
+        [u for u in boundary_bonds if is_bottom_penultimate_row_atom(u)],
+        key=lambda u: conf.GetAtomPosition(u).x,
+    )
+
+    carbon_choices = []
+    for top_bond in top_carbon_bonds:
+        for bottom_bond in bottom_carbon_bonds:
+            if top_bond != bottom_bond:
+                carbon_choices.append((top_bond, bottom_bond))
+
+    for br_bonds in br_pairs:
+        for carbon_bonds in carbon_choices:
+            if set(br_bonds).intersection(carbon_bonds):
+                continue
+            rw_mol = Chem.RWMol(base_rw_mol)
+            for u in br_bonds:
+                cap = rw_mol.AddAtom(Chem.Atom("Br"))
+                rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
+            for carbon_bond in carbon_bonds:
+                cap = rw_mol.AddAtom(Chem.Atom("C"))
+                rw_mol.AddBond(old_to_new_map[carbon_bond], cap, Chem.BondType.SINGLE)
+            try:
+                Chem.SanitizeMol(rw_mol)
+                capped_mols.append(rw_mol.GetMol())
+            except Exception:
+                pass
     return capped_mols
 
 def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
