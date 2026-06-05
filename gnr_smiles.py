@@ -545,9 +545,14 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
 
     for idx, mol in enumerate(capped_results):
         smi = Chem.MolToSmiles(mol)
-        out_smi_name = capped_smi_filename if len(capped_results) == 1 else capped_smi_filename.replace(".smi", f"_{idx+1}.smi")
-        out_img_name = img_filename if len(capped_results) == 1 else img_filename.replace(".png", f"_{idx+1}.png")
-        
+        if len(capped_results) == 1:
+            out_smi_name = capped_smi_filename
+            out_img_name = img_filename
+        else:
+            smi_p = Path(capped_smi_filename)
+            out_smi_name = str(smi_p.parent / f"{smi_p.stem}_{idx+1}{smi_p.suffix}")
+            img_p = Path(img_filename)
+            out_img_name = str(img_p.parent / f"{img_p.stem}_{idx+1}{img_p.suffix}")
         try:
             with open(out_smi_name, 'w') as f:
                 f.write(smi)
