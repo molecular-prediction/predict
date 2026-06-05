@@ -3,17 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TH.Xie GNR Web</title>
+  <title>AI_for_gnr</title>
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 <body>
   <main class="shell">
     <section class="hero">
-      <div>
-        <p class="eyebrow">TH.Xie · GNR Pipeline</p>
-        <h1>smile 文件上传 / 直接输入 smile 码</h1>
-        <p class="lead">上传后会保存到项目内 `smile/` 目录，再调用原有算法生成切割图、原始骨架 smile、封端 smile 和图片。</p>
-      </div>
+      <h1>AI_for_gnr</h1>
     </section>
 
     <section class="panel">
@@ -38,19 +34,13 @@
       <section class="panel error">{{ error }}</section>
     {% endif %}
 
-    {% if saved_input %}
-      <section class="panel meta">
-        <div><strong>输入文件：</strong>{{ saved_input }}</div>
-        {% if input_smiles %}
-          <div class="mono"><strong>输入 smile：</strong>{{ input_smiles }}</div>
-        {% endif %}
-      </section>
-    {% endif %}
-
-    {% if result %}
+{% if result %}
       <section class="panel meta">
         <div><strong>状态：</strong>{{ result.message }}</div>
         <div><strong>苯环数：</strong>{{ result.hex_count }} <strong>总宽度：</strong>{{ result.total_width }}</div>
+        {% if judging_async %}
+          <div class="empty">模型评判已转入后台执行，页面不会等待其完成。</div>
+        {% endif %}
       </section>
 
       {% if artifacts_view %}
@@ -80,12 +70,24 @@
               </div>
 
               <div class="block">
-                <h3>Capped SMILES</h3>
                 {% if item.capped_smiles %}
-                  {% for smi in item.capped_smiles %}
-                    <div class="mono">{{ smi }}</div>
-                  {% endfor %}
+                  <details class="capped-details">
+                    <summary>Capped SMILES ({{ item.capped_smiles|length }} structures)</summary>
+                    <div class="capped-list">
+                      {% for smi in item.capped_smiles %}
+                        <div class="capped-item">
+                          <div class="mono">{{ smi }}</div>
+                          {% if loop.index0 < item.monomer_images|length %}
+                            <a class="image-link" href="{{ item.monomer_images[loop.index0] }}" target="_blank" rel="noreferrer">
+                              <img src="{{ item.monomer_images[loop.index0] }}" alt="monomer {{ loop.index }}">
+                            </a>
+                          {% endif %}
+                        </div>
+                      {% endfor %}
+                    </div>
+                  </details>
                 {% else %}
+                  <h3>Capped SMILES</h3>
                   <div class="empty">暂无</div>
                 {% endif %}
               </div>
@@ -108,6 +110,8 @@
                       {% endif %}
                     </div>
                   {% endfor %}
+                {% elif judging_async %}
+                  <div class="empty">评判正在后台进行中，稍后刷新页面可查看结果。</div>
                 {% else %}
                   <div class="empty">暂无</div>
                 {% endif %}
