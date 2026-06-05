@@ -192,7 +192,7 @@ def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
         artifact.capped_smile_files.append(str(path))
         artifact.capped_smiles.append(_read_smiles_from_file(path))
 
-    for path in MONOMER_IMG_DIR.glob("*.svg"):
+    for path in MONOMER_IMG_DIR.glob("*.png"):
         if path.stat().st_mtime < start_ts:
             continue
         match = image_pattern.match(path.stem)
