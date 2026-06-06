@@ -84,6 +84,21 @@ def _count_terminal_aliphatic_carbons(mol: Chem.Mol) -> int:
     )
 
 
+def _accept_capped_monomer(mol: Chem.Mol, edge_type: str) -> bool:
+    """按 edge_type 决定封端产物是否合格（数量过滤）。
+
+    - zigzag：Br==2 且末端脂肪碳(甲基)==2（保 7ac/4.smi 基线）。
+    - armchair：Br==2 且甲基 in {0,2}（竖直 fused 堆上下端通常无固定边断键→0 甲基）。
+      至少 2 个 Br 保证周期方向可继续聚合。
+    """
+    if _count_atoms_by_symbol(mol, "Br") != 2:
+        return False
+    methyl = _count_terminal_aliphatic_carbons(mol)
+    if edge_type == "armchair":
+        return methyl in (0, 2)
+    return methyl == 2
+
+
 def _hexes_form_connected_fused_component(window_hexes: List[BenzeneHex]) -> bool:
     if not window_hexes:
         return False
@@ -578,7 +593,7 @@ def _generate_armchair_monomers(
             best = max(frags, key=lambda m: m.GetNumAtoms())
             if best.GetNumAtoms() != capped_mol.GetNumAtoms():
                 continue  # 必须是连通单分子
-            if _count_atoms_by_symbol(best, "Br") != 2:
+            if not _accept_capped_monomer(best, "armchair"):
                 continue
             smi = Chem.MolToSmiles(best)
             if smi in unique_capped_smiles:
@@ -764,8 +779,7 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
 
     capped_results = [
         mol for mol in capped_results
-        if _count_atoms_by_symbol(mol, "Br") == 2
-        and _count_terminal_aliphatic_carbons(mol) == 2
+        if _accept_capped_monomer(mol, "zigzag")
     ]
     if not capped_results:
         result.failure_reason = "no dibrominated dimethyl capped monomer smiles generated"
