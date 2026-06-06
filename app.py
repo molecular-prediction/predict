@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -104,11 +105,18 @@ async def run_web(
     smile_file: Optional[UploadFile] = File(default=None),
 ):
     try:
+        temp_input_path = None
         if smile_file and smile_file.filename:
             file_bytes = await smile_file.read()
             saved_input = save_uploaded_smile_file(smile_file.filename, file_bytes)
         elif smile_text.strip():
-            saved_input = save_input_smile_file(smile_text.strip())
+            # 不再把网页输入的 smile 持久化到 smile/ 目录（避免生成 web_*.smi 文件）。
+            # 原逻辑：saved_input = save_input_smile_file(smile_text.strip())
+            # 改为写入临时文件，pipeline 读取后在 finally 中删除。
+            fd, temp_input_path = tempfile.mkstemp(suffix=".smi")
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                tmp_f.write(smile_text.strip() + "\n")
+            saved_input = Path(temp_input_path)
         else:
             return _render_index(
                 request,
@@ -148,6 +156,12 @@ async def run_web(
             },
         )
     finally:
+        # 删除网页输入产生的临时 smile 文件（如果有）。
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.remove(temp_input_path)
+            except OSError:
+                pass
         clean_pycache()
 
 
