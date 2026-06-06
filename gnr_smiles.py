@@ -439,8 +439,11 @@ def _extract_armchair_capped_monomers(
 ) -> List[Chem.Mol]:
     """armchair 周期单元封端：在跨周期边界（左/右堆外）的 biaryl 断键上各封一个 Br。
 
-    左右各取一个断键，组合所有 (left, right) 配对；保留能 SanitizeMol 且恰含
-    2 个 Br 的连通单分子。固定边（上/下端）为完整环边、带 H，不加甲基。
+    每个断键都封端，封什么由其外部邻居方向决定：
+      - 周期方向（外部邻居堆在窗口左/右之外）→ Br，左右各取一个组合配对；
+      - 固定边（外部邻居在窗口堆范围内，指向上/下边界外）→ 甲基(C)。
+    armchair 竖直 fused 堆上下端通常是完整环边、带 H（无固定边断键），此时
+    0 甲基，合法。保留能 SanitizeMol 的产物。
     """
     monomer_atoms = set(aid for h in window_hexes for aid in h.atom_indices)
     if not monomer_atoms:
@@ -467,6 +470,7 @@ def _extract_armchair_capped_monomers(
     max_stack = max(window_stacks)
     left_bonds: List[int] = []
     right_bonds: List[int] = []
+    fixed_edge_bonds: List[int] = []
     for u in sorted_old_indices:
         for neighbor in original_mol.GetAtomWithIdx(u).GetNeighbors():
             n_idx = neighbor.GetIdx()
@@ -476,12 +480,19 @@ def _extract_armchair_capped_monomers(
             if not neighbor_stacks:
                 continue
             if max(neighbor_stacks) < min_stack:
-                left_bonds.append(u)
+                left_bonds.append(u)        # 周期方向（左）→ Br
             elif min(neighbor_stacks) > max_stack:
-                right_bonds.append(u)
+                right_bonds.append(u)       # 周期方向（右）→ Br
+            else:
+                fixed_edge_bonds.append(u)  # 固定边（上/下）→ 甲基/H
 
     if not left_bonds or not right_bonds:
         return []
+
+    # 固定边断键：每个都封一个甲基（C）。armchair 竖直 fused 堆上下端通常为
+    # 完整环边、无固定边断键（fixed_edge_bonds 为空）→ 0 甲基，合法。
+    conf = original_mol.GetConformer()
+    fixed_edge_bonds = sorted(fixed_edge_bonds, key=lambda u: conf.GetAtomPosition(u).x)
 
     capped_mols = []
     for left in left_bonds:
@@ -489,6 +500,9 @@ def _extract_armchair_capped_monomers(
             rw_mol = Chem.RWMol(base_rw_mol)
             for u in (left, right):
                 cap = rw_mol.AddAtom(Chem.Atom("Br"))
+                rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
+            for u in fixed_edge_bonds:
+                cap = rw_mol.AddAtom(Chem.Atom("C"))
                 rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
             try:
                 Chem.SanitizeMol(rw_mol)
