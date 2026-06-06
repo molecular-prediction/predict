@@ -164,9 +164,27 @@ def classify_edge_type(hexes: List[BenzeneHex], mol=None) -> str:
     return "zigzag"
 
 
+def _minimal_sequence_period(seq: List[int]) -> int:
+    """求整数序列的最小重复周期 p（seq[i]==seq[i%p] 对所有 i 成立）。"""
+    n = len(seq)
+    if n == 0:
+        return 1
+    for period in range(1, n + 1):
+        if all(seq[i] == seq[i % period] for i in range(n)):
+            return period
+    return n
+
+
 def infer_minimal_period_cols(hexes: List[BenzeneHex], total_width: int) -> int:
     if total_width <= 1:
         return max(total_width, 1)
+
+    # armchair：grid 的 col 分桶会把错开半周期的竖直堆合并，导致 row_counts
+    # 在每列均匀、误判周期=1。改用竖直堆环数序列求真实最小周期（实测=2）。
+    if classify_edge_type(hexes) == "armchair":
+        heights = _vertical_stack_heights(hexes)
+        stack_period = _minimal_sequence_period(heights)
+        return max(1, min(stack_period, total_width))
 
     row_counts_by_col = []
     for col in range(total_width):
