@@ -319,15 +319,25 @@ def run_generation_pipeline(
     found_any_global = False
     seen_product_signatures = set()
     max_k = total_width if max_k_attempts is None else min(max_k_attempts, total_width)
+    # armchair 的周期单元生成（_generate_armchair_monomers）只依赖竖直堆窗口、
+    # 不依赖 k；若沿用 zigzag 的 k=1..max_k 全扫描，会把同一批产物在每个 k 下重复
+    # 落盘一份（去重签名含 k 拦不住）。armchair 仅在真实堆周期对应的单一 k 产出，
+    # 使 cut_method_k*_v* 的 k 语义与 §2 竖直堆周期一致。zigzag 行为一字不变。
+    if edge_type == "armchair":
+        armchair_k = max(1, min(minimal_period_cols, max_k))
+        k_values = [armchair_k]
+    else:
+        k_values = list(range(1, max_k + 1))
     logger.info(
-        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s edge_type=%s",
+        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s edge_type=%s k_values=%s",
         total_width,
         minimal_period_cols,
         max_k,
         edge_type,
+        k_values,
     )
 
-    for k in range(1, max_k + 1):
+    for k in k_values:
         tiles = partition_into_tiles(hexes, k_cols=k)
         if not tiles:
             continue
