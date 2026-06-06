@@ -108,7 +108,13 @@ async def run_web(
         temp_input_path = None
         if smile_file and smile_file.filename:
             file_bytes = await smile_file.read()
-            saved_input = save_uploaded_smile_file(smile_file.filename, file_bytes)
+            # 不再把上传的 smile 文件持久化到 smile/ 目录（避免生成 web_*.smi 文件）。
+            # 原逻辑：saved_input = save_uploaded_smile_file(smile_file.filename, file_bytes)
+            # 改为写入临时文件，pipeline 读取后在 finally 中删除。
+            fd, temp_input_path = tempfile.mkstemp(suffix=".smi")
+            with os.fdopen(fd, "wb") as tmp_f:
+                tmp_f.write(file_bytes)
+            saved_input = Path(temp_input_path)
         elif smile_text.strip():
             # 不再把网页输入的 smile 持久化到 smile/ 目录（避免生成 web_*.smi 文件）。
             # 原逻辑：saved_input = save_input_smile_file(smile_text.strip())
