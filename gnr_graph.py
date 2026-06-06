@@ -110,6 +110,60 @@ def partition_into_tiles(hexes: List[BenzeneHex], k_cols: int) -> Dict[int, List
     return groups
 
 
+def _cluster_1d(values: List[float], tol: float) -> List[List[float]]:
+    """将一维数值按间距 tol 聚类（升序）。path/apply 不依赖此函数。"""
+    if not values:
+        return []
+    sorted_values = sorted(values)
+    clusters = [[sorted_values[0]]]
+    for value in sorted_values[1:]:
+        if abs(value - clusters[-1][-1]) < tol:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+    return clusters
+
+
+def _vertical_stack_heights(hexes: List[BenzeneHex]) -> List[int]:
+    """按 cx 把环心聚成竖直堆，返回每堆环数（按 cx 升序）。
+
+    armchair 蜂窝相邻堆错开半周期，grid 的 col 分桶会把这些堆合并，
+    因此此处直接用 cx 聚类还原真实的竖直堆叠序列。
+    """
+    if not hexes:
+        return []
+    avg_ring_size = sum(h.size for h in hexes) / len(hexes)
+    tol = avg_ring_size * 0.6
+    centers = [sum(c) / len(c) for c in _cluster_1d([h.cx for h in hexes], tol)]
+    if not centers:
+        return []
+    heights = [0] * len(centers)
+    for h in hexes:
+        nearest = min(range(len(centers)), key=lambda i: abs(centers[i] - h.cx))
+        heights[nearest] += 1
+    return heights
+
+
+def classify_edge_type(hexes: List[BenzeneHex], mol=None) -> str:
+    """判别 GNR 边缘类型：返回 "zigzag" 或 "armchair"。
+
+    判据 1（几何，主）：按 cx 聚成竖直堆得到每堆环数 heights，取内部
+    core = heights[1:-1]（去掉两端残缺堆）。若 core 内堆高不一致（交替）
+    → armchair；否则 → zigzag。
+
+    实测：7ac core 全 1、4.smi core 全 2 → zigzag；
+    gnr_3_other core=[3,2,...]、gnr_2_other core=[1,2,...] → armchair。
+    """
+    heights = _vertical_stack_heights(hexes)
+    if len(heights) <= 2:
+        # 太短无法判断交替，默认按 zigzag（与现有行为一致，不引入新分支）
+        return "zigzag"
+    core = heights[1:-1]
+    if len(set(core)) > 1:
+        return "armchair"
+    return "zigzag"
+
+
 def infer_minimal_period_cols(hexes: List[BenzeneHex], total_width: int) -> int:
     if total_width <= 1:
         return max(total_width, 1)
