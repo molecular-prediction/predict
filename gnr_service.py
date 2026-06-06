@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from gnr_graph import (
     apply_path_to_all_tiles,
     build_edges_and_adj_geometric,
+    classify_edge_type,
     infer_minimal_period_cols,
     mol_to_hex_grid,
     partition_into_tiles,
@@ -312,16 +313,18 @@ def run_generation_pipeline(
     mol = read_smiles_and_generate_coords(input_file)
     hexes, total_width = mol_to_hex_grid(mol)
     minimal_period_cols = infer_minimal_period_cols(hexes, total_width)
+    edge_type = classify_edge_type(hexes, mol)
     _edges, all_adj = build_edges_and_adj_geometric(hexes)
 
     found_any_global = False
     seen_product_signatures = set()
     max_k = total_width if max_k_attempts is None else min(max_k_attempts, total_width)
     logger.info(
-        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s",
+        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s edge_type=%s",
         total_width,
         minimal_period_cols,
         max_k,
+        edge_type,
     )
 
     for k in range(1, max_k + 1):
@@ -392,6 +395,7 @@ def run_generation_pipeline(
                     str(raw_smi_path),
                     str(capped_smi_path),
                     str(monomer_img_path),
+                    edge_type=edge_type,
                 )
                 if not monomer_result.is_valid:
                     logger.info(
