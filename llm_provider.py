@@ -1,5 +1,6 @@
 import os
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,8 @@ class SmileJudgement:
     model: str
     status: str = "ok"
     error: Optional[str] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 class OpenAILLMProvider:
@@ -43,6 +46,7 @@ class OpenAILLMProvider:
         self.judge_prompt = _get_env("LLM_JUDGE_PROMPT", "OPENAI_JUDGE_PROMPT", default="")
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self._token_lock = threading.Lock()
         logger.info("LLM provider initialized: model=%s base_url=%s", self.model, base_url or "default")
 
     @classmethod
@@ -77,13 +81,14 @@ class OpenAILLMProvider:
             message = getattr(choice, "message", None)
             judgment = getattr(message, "content", "") or ""
 
-        # 记录 token 消耗
+        # 记录 token 消耗（并发调用下用锁保护累计计数器）
         usage = getattr(response, "usage", None)
         prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
         completion_tokens = getattr(usage, "completion_tokens", 0) or 0
-        self.total_prompt_tokens += prompt_tokens
-        self.total_completion_tokens += completion_tokens
-        cumulative = self.total_prompt_tokens + self.total_completion_tokens
+        with self._token_lock:
+            self.total_prompt_tokens += prompt_tokens
+            self.total_completion_tokens += completion_tokens
+            cumulative = self.total_prompt_tokens + self.total_completion_tokens
 
         logger.info(
             "LLM judging finished: model=%s tokens(in=%d out=%d) cum=%d smiles=%s",
@@ -96,6 +101,8 @@ class OpenAILLMProvider:
             smile=smiles,
             judgment=judgment,
             model=self.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     @property
