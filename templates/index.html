@@ -143,7 +143,6 @@
   function renderJudgements(data) {
     if (!data.artifacts) return [0, 0];
     let totalDone = 0;
-    let totalExpected = 0;
     for (const art of data.artifacts) {
       const block = document.querySelector('[data-judge-block="' + art.base_name + '"]');
       if (!block) continue;
