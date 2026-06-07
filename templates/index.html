@@ -39,7 +39,8 @@
         <div><strong>状态：</strong>{{ result.message }}</div>
         <div><strong>苯环数：</strong>{{ result.hex_count }} <strong>总宽度：</strong>{{ result.total_width }}</div>
         {% if judging_async %}
-          <div class="empty">模型评判已转入后台执行，页面不会等待其完成。</div>
+          <div id="judge-status" class="empty">LLM 评判进行中...</div>
+          <div id="token-usage" style="margin-top:6px;font-size:0.9em;color:#666;"></div>
         {% endif %}
       </section>
 
@@ -92,8 +93,8 @@
                 {% endif %}
               </div>
 
-              <div class="block">
-                <h3>OpenAI 评判</h3>
+              <div class="block" data-judge-block="{{ item.base_name }}">
+                <h3>LLM 评判</h3>
                 {% if item.smile_judgements %}
                   {% for judgement in item.smile_judgements %}
                     <div class="judge">
@@ -111,7 +112,7 @@
                     </div>
                   {% endfor %}
                 {% elif judging_async %}
-                  <div class="empty">评判正在后台进行中，稍后刷新页面可查看结果。</div>
+                  <div class="empty judge-loading">评判中...</div>
                 {% else %}
                   <div class="empty">暂无</div>
                 {% endif %}
@@ -130,5 +131,57 @@
       {% endif %}
     {% endif %}
   </main>
+
+{% if judging_async and run_id %}
+<script>
+(function() {
+  const runId = "{{ run_id }}";
+  if (!runId) return;
+  const statusEl = document.getElementById("judge-status");
+  const tokenEl = document.getElementById("token-usage");
+
+  function renderJudgements(data) {
+    // data.artifacts = [{base_name, judgements: [{smile, judgment, model, status, error}]}]
+    for (const art of data.artifacts) {
+      const block = document.querySelector(`[data-judge-block="${art.base_name}"]`);
+      if (!block) continue;
+      let html = '<h3>LLM 评判</h3>';
+      for (const j of art.judgements) {
+        html += '<div class="judge">';
+        html += `<div class="mono">${j.smile}</div>`;
+        html += `<div class="judge-meta"><span>model: ${j.model || '未配置'}</span> <span>status: ${j.status}</span></div>`;
+        if (j.judgment) html += `<div class="judge-text">${j.judgment}</div>`;
+        if (j.error) html += `<div class="judge-error">${j.error}</div>`;
+        html += '</div>';
+      }
+      block.innerHTML = html;
+    }
+  }
+
+  function renderTokens(usage) {
+    if (!usage || !usage.total_tokens) {
+      tokenEl.textContent = "";
+      return;
+    }
+    tokenEl.textContent = `Token 用量：${usage.prompt_tokens} 入 + ${usage.completion_tokens} 出 = ${usage.total_tokens} total（模型: ${usage.model}）`;
+  }
+
+  let timer = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/judgements/${runId}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.done) {
+        clearInterval(timer);
+        statusEl.textContent = "LLM 评判完成";
+        renderJudgements(data);
+        renderTokens(data.token_usage);
+      }
+    } catch(e) { /* ignore network errors, retry next tick */ }
+  }, 2000);
+})();
+</script>
+{% endif %}
+
 </body>
 </html>
