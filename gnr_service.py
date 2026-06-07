@@ -243,7 +243,14 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
                 continue
             tasks.append((art_idx, smi_idx, smile))
 
-    logger.info("LLM judging: %d SMILES across %d artifacts, max_workers=100", len(tasks), len(artifacts))
+    max_workers = int(os.getenv("LLM_JUDGE_MAX_WORKERS", "10"))
+    max_workers = max(1, min(max_workers, len(tasks) or 1))
+    logger.info(
+        "LLM judging: %d SMILES across %d artifacts, max_workers=%d",
+        len(tasks),
+        len(artifacts),
+        max_workers,
+    )
 
     # 预分配结果槽
     results_map: Dict[Tuple[int, int], SmileJudgement] = {}
@@ -262,7 +269,7 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
                 error=str(exc),
             ))
 
-    with ThreadPoolExecutor(max_workers=100) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_judge_one, art_idx, smi_idx, smile): (art_idx, smi_idx)
             for art_idx, smi_idx, smile in tasks
