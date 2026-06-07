@@ -118,8 +118,11 @@ def _load_dotenv_file() -> None:
         return
 
     try:
-        for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = raw_line.strip()
+        raw_lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        i = 0
+        while i < len(raw_lines):
+            line = raw_lines[i].strip()
+            i += 1
             if not line or line.startswith("#") or "=" not in line:
                 continue
             if line.startswith("export "):
@@ -128,6 +131,13 @@ def _load_dotenv_file() -> None:
             key = key.strip()
             if not key:
                 continue
+
+            # 处理续行：行尾的 \ 表示下一行是当前值的延续
+            while value.endswith("\\") and i < len(raw_lines):
+                value = value[:-1]  # 去掉行尾的续行符
+                continuation = raw_lines[i].strip()
+                i += 1
+                value += "\n" + continuation
 
             value = value.strip().strip("'").strip('"')
             current = os.environ.get(key)
