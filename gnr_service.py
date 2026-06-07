@@ -2,6 +2,7 @@ import os
 import re
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -212,31 +213,15 @@ def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
 
 
 def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAILLMProvider]) -> None:
-    for artifact in artifacts:
-        logger.info(
-            "Start judging artifact: base_name=%s k=%s variant=%s capped_count=%s",
-            artifact.base_name,
-            artifact.k,
-            artifact.variant,
-            len(artifact.capped_smile_files),
-        )
-        judgements: List[SmileJudgement] = []
-        for index, smile_file in enumerate(artifact.capped_smile_files, start=1):
-            smile = _read_smiles_from_file(Path(smile_file))
-            if not smile:
-                logger.warning(
-                    "Skip empty SMILES file: artifact=%s file=%s",
-                    artifact.base_name,
-                    smile_file,
-                )
-                continue
-            if provider is None:
-                logger.warning(
-                    "LLM provider unavailable, skipping judgement: artifact=%s index=%s smiles=%s",
-                    artifact.base_name,
-                    index,
-                    smile,
-                )
+    """并行调用 LLM 评判所有 artifact 的 capped SMILES（并发上限 100）。"""
+    if provider is None:
+        # 无 provider 时直接标记所有为 disabled，不需要并行
+        for artifact in artifacts:
+            judgements = []
+            for smile_file in artifact.capped_smile_files:
+                smile = _read_smiles_from_file(Path(smile_file))
+                if not smile:
+                    continue
                 judgements.append(
                     SmileJudgement(
                         smile=smile,
@@ -246,39 +231,52 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
                         error="OpenAI provider unavailable",
                     )
                 )
+            artifact.smile_judgements = judgements
+        return
+
+    # 收集所有需要评判的任务：(artifact_index, smile_index, smile_str)
+    tasks = []
+    for art_idx, artifact in enumerate(artifacts):
+        for smi_idx, smile_file in enumerate(artifact.capped_smile_files):
+            smile = _read_smiles_from_file(Path(smile_file))
+            if not smile:
                 continue
-            try:
-                logger.info(
-                    "Judging SMILES: artifact=%s index=%s smiles=%s",
-                    artifact.base_name,
-                    index,
-                    smile,
-                )
-                result = provider.judge_smiles(smile)
-                logger.info(
-                    "Judgement done: artifact=%s index=%s model=%s status=%s",
-                    artifact.base_name,
-                    index,
-                    result.model,
-                    result.status,
-                )
-                judgements.append(result)
-            except Exception as exc:
-                logger.exception(
-                    "Judgement failed: artifact=%s index=%s smiles=%s",
-                    artifact.base_name,
-                    index,
-                    smile,
-                )
-                judgements.append(
-                    SmileJudgement(
-                        smile=smile,
-                        judgment="",
-                        model=provider.model,
-                        status="error",
-                        error=str(exc),
-                    )
-                )
+            tasks.append((art_idx, smi_idx, smile))
+
+    logger.info("LLM judging: %d SMILES across %d artifacts, max_workers=100", len(tasks), len(artifacts))
+
+    # 预分配结果槽
+    results_map: Dict[Tuple[int, int], SmileJudgement] = {}
+
+    def _judge_one(art_idx: int, smi_idx: int, smile: str) -> Tuple[int, int, SmileJudgement]:
+        try:
+            result = provider.judge_smiles(smile)
+            return (art_idx, smi_idx, result)
+        except Exception as exc:
+            logger.exception("Judgement failed: smile=%s", smile)
+            return (art_idx, smi_idx, SmileJudgement(
+                smile=smile,
+                judgment="",
+                model=provider.model,
+                status="error",
+                error=str(exc),
+            ))
+
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        futures = {
+            executor.submit(_judge_one, art_idx, smi_idx, smile): (art_idx, smi_idx)
+            for art_idx, smi_idx, smile in tasks
+        }
+        for future in as_completed(futures):
+            art_idx, smi_idx, judgement = future.result()
+            results_map[(art_idx, smi_idx)] = judgement
+
+    # 按原始顺序回填结果
+    for art_idx, artifact in enumerate(artifacts):
+        judgements = []
+        for smi_idx in range(len(artifact.capped_smile_files)):
+            if (art_idx, smi_idx) in results_map:
+                judgements.append(results_map[(art_idx, smi_idx)])
         artifact.smile_judgements = judgements
         logger.info(
             "Finished judging artifact: base_name=%s success_count=%s",
