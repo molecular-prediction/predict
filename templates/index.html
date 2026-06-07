@@ -141,21 +141,26 @@
   const tokenEl = document.getElementById("token-usage");
 
   function renderJudgements(data) {
-    // data.artifacts = [{base_name, judgements: [{smile, judgment, model, status, error}]}]
+    if (!data.artifacts) return;
+    let totalDone = 0;
+    let totalExpected = 0;
     for (const art of data.artifacts) {
-      const block = document.querySelector(`[data-judge-block="${art.base_name}"]`);
+      const block = document.querySelector('[data-judge-block="' + art.base_name + '"]');
       if (!block) continue;
+      totalDone += art.judgements.length;
+      if (art.judgements.length === 0) continue;
       let html = '<h3>LLM 评判</h3>';
       for (const j of art.judgements) {
         html += '<div class="judge">';
-        html += `<div class="mono">${j.smile}</div>`;
-        html += `<div class="judge-meta"><span>model: ${j.model || '未配置'}</span> <span>status: ${j.status}</span></div>`;
-        if (j.judgment) html += `<div class="judge-text">${j.judgment}</div>`;
-        if (j.error) html += `<div class="judge-error">${j.error}</div>`;
+        html += '<div class="mono">' + j.smile + '</div>';
+        html += '<div class="judge-meta"><span>model: ' + (j.model || '未配置') + '</span> <span>status: ' + j.status + '</span></div>';
+        if (j.judgment) html += '<div class="judge-text">' + j.judgment + '</div>';
+        if (j.error) html += '<div class="judge-error">' + j.error + '</div>';
         html += '</div>';
       }
       block.innerHTML = html;
     }
+    return totalDone;
   }
 
   function renderTokens(usage) {
@@ -163,21 +168,24 @@
       tokenEl.textContent = "";
       return;
     }
-    tokenEl.textContent = `Token 用量：${usage.prompt_tokens} 入 + ${usage.completion_tokens} 出 = ${usage.total_tokens} total（模型: ${usage.model}）`;
+    tokenEl.textContent = 'Token 用量: ' + usage.prompt_tokens + ' 入 + ' + usage.completion_tokens + ' 出 = ' + usage.total_tokens + ' total (模型: ' + usage.model + ')';
   }
 
-  let timer = setInterval(async () => {
+  let timer = setInterval(async function() {
     try {
-      const resp = await fetch(`/api/judgements/${runId}`);
+      const resp = await fetch('/api/judgements/' + runId);
       if (!resp.ok) return;
       const data = await resp.json();
+      // 每次轮询都渲染已完成的部分 + 更新 token
+      renderJudgements(data);
+      renderTokens(data.token_usage);
       if (data.done) {
         clearInterval(timer);
         statusEl.textContent = "LLM 评判完成";
-        renderJudgements(data);
-        renderTokens(data.token_usage);
+      } else {
+        statusEl.textContent = "LLM 评判进行中...";
       }
-    } catch(e) { /* ignore network errors, retry next tick */ }
+    } catch(e) {}
   }, 2000);
 })();
 </script>
