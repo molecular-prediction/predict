@@ -94,8 +94,13 @@ class OpenAILLMProvider:
             "LLM judging finished: model=%s tokens(in=%d out=%d) cum=%d smiles=%s",
             self.model, prompt_tokens, completion_tokens, cumulative, smiles,
         )
-        # 同步输出到控制台，方便查看累计消耗
-        print(f"[LLM] 本次 tokens: {prompt_tokens}入 {completion_tokens}出 | 累计消耗: {cumulative} tokens | 模型: {self.model}")
+        logger.debug(
+            "[LLM] 本次 tokens: %d入 %d出 | 累计消耗: %d tokens | 模型: %s",
+            prompt_tokens,
+            completion_tokens,
+            cumulative,
+            self.model,
+        )
 
         return SmileJudgement(
             smile=smiles,
