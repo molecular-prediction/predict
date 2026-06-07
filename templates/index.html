@@ -39,7 +39,8 @@
         <div><strong>状态：</strong>{{ result.message }}</div>
         <div><strong>苯环数：</strong>{{ result.hex_count }} <strong>总宽度：</strong>{{ result.total_width }}</div>
         {% if judging_async %}
-          <div class="empty">模型评判已转入后台执行，页面不会等待其完成。</div>
+          <div id="judge-status" class="empty">LLM 评判进行中...</div>
+          <div id="token-usage" style="margin-top:6px;font-size:0.9em;color:#666;"></div>
         {% endif %}
       </section>
 
@@ -92,8 +93,8 @@
                 {% endif %}
               </div>
 
-              <div class="block">
-                <h3>OpenAI 评判</h3>
+              <div class="block" data-judge-block="{{ item.base_name }}">
+                <h3>LLM 评判</h3>
                 {% if item.smile_judgements %}
                   {% for judgement in item.smile_judgements %}
                     <div class="judge">
@@ -111,7 +112,7 @@
                     </div>
                   {% endfor %}
                 {% elif judging_async %}
-                  <div class="empty">评判正在后台进行中，稍后刷新页面可查看结果。</div>
+                  <div class="empty judge-loading">评判中...</div>
                 {% else %}
                   <div class="empty">暂无</div>
                 {% endif %}
@@ -130,5 +131,80 @@
       {% endif %}
     {% endif %}
   </main>
+
+{% if judging_async and run_id %}
+<script>
+(function() {
+  const runId = "{{ run_id }}";
+  if (!runId) return;
+  const statusEl = document.getElementById("judge-status");
+  const tokenEl = document.getElementById("token-usage");
+
+  function renderJudgements(data) {
+    if (!data.artifacts) return [0, 0];
+    let totalDone = 0;
+    for (const art of data.artifacts) {
+      const block = document.querySelector('[data-judge-block="' + art.base_name + '"]');
+      if (!block) continue;
+      totalExpected += art.judgements.length;
+      if (art.judgements.length === 0) continue;
+      let html = '<h3>LLM 评判</h3>';
+      for (const j of art.judgements) {
+        const status = j.status || 'pending';
+        if (status === 'pending') {
+          html += '<div class="judge"><div class="mono">' + j.smile + '</div><div class="empty judge-loading">评判中...</div></div>';
+          continue;
+        }
+        totalDone += 1;
+        html += '<div class="judge">';
+        html += '<div class="mono">' + j.smile + '</div>';
+        html += '<div class="judge-meta"><span>model: ' + (j.model || '未配置') + '</span> <span>status: ' + status + '</span>';
+        if (j.prompt_tokens || j.completion_tokens) {
+          html += ' <span>tokens: ' + (j.prompt_tokens || 0) + ' 入 + ' + (j.completion_tokens || 0) + ' 出</span>';
+        }
+        html += '</div>';
+        if (j.judgment) html += '<div class="judge-text">' + j.judgment + '</div>';
+        if (j.error) html += '<div class="judge-error">' + j.error + '</div>';
+        html += '</div>';
+      }
+      block.innerHTML = html;
+    }
+    return [totalDone, totalExpected];
+  }
+
+  function renderTokens(usage, done) {
+    if (!usage || !usage.total_tokens) {
+      tokenEl.textContent = "";
+      return;
+    }
+    const prefix = done ? '总 Token 用量: ' : '累计 Token 用量: ';
+    tokenEl.textContent = prefix + usage.prompt_tokens + ' 入 + ' + usage.completion_tokens + ' 出 = ' + usage.total_tokens + ' total (模型: ' + usage.model + ')';
+  }
+
+  let timer = setInterval(async function() {
+    try {
+      const resp = await fetch('/api/judgements/' + runId);
+      if (resp.status === 404) {
+        // run 已过期被清理，停止轮询
+        clearInterval(timer);
+        return;
+      }
+      if (!resp.ok) return;
+      const data = await resp.json();
+      // 每次轮询都渲染已完成的部分 + 更新 token
+      const counts = renderJudgements(data);
+      renderTokens(data.token_usage, data.done);
+      if (data.done) {
+        clearInterval(timer);
+        statusEl.textContent = "LLM 评判完成（共 " + counts[1] + " 条）";
+      } else {
+        statusEl.textContent = "LLM 评判进行中... (" + counts[0] + "/" + counts[1] + ")";
+      }
+    } catch(e) {}
+  }, 2000);
+})();
+</script>
+{% endif %}
+
 </body>
 </html>

@@ -6,6 +6,12 @@ from typing import List, Dict, Tuple
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 from gnr_types import BenzeneHex, GlobalCutPlan
+from gnr_graph import (
+    classify_edge_type,
+    _cluster_1d,
+    _vertical_stack_heights,
+    _minimal_sequence_period,
+)
 
 
 @dataclass
@@ -76,6 +82,21 @@ def _count_terminal_aliphatic_carbons(mol: Chem.Mol) -> int:
         for atom in mol.GetAtoms()
         if atom.GetSymbol() == "C" and not atom.GetIsAromatic() and atom.GetDegree() == 1
     )
+
+
+def _accept_capped_monomer(mol: Chem.Mol, edge_type: str) -> bool:
+    """按 edge_type 决定封端产物是否合格（数量过滤）。
+
+    - zigzag：Br==2 且末端脂肪碳(甲基)==2（保 7ac/4.smi 基线）。
+    - armchair：Br==2 且甲基 in {0,2}（竖直 fused 堆上下端通常无固定边断键→0 甲基）。
+      至少 2 个 Br 保证周期方向可继续聚合。
+    """
+    if _count_atoms_by_symbol(mol, "Br") != 2:
+        return False
+    methyl = _count_terminal_aliphatic_carbons(mol)
+    if edge_type == "armchair":
+        return methyl in (0, 2)
+    return methyl == 2
 
 
 def _hexes_form_connected_fused_component(window_hexes: List[BenzeneHex]) -> bool:
@@ -408,10 +429,255 @@ def extract_all_capped_monomers(
                 pass
     return capped_mols
 
+def _assign_vertical_stacks(all_hexes: List[BenzeneHex]) -> Tuple[Dict[int, int], int]:
+    """把每个环分配到一个竖直堆（按 cx 聚类），返回 (hex_id->stack_index, 堆数)。
+
+    armchair 蜂窝相邻堆错开半周期，mol_to_hex_grid 的 col 分桶会把它们合并，
+    无法用于切出可 kekulize 的周期单元；这里按 cx 还原真实竖直堆。
+    """
+    if not all_hexes:
+        return {}, 0
+    avg_ring_size = sum(h.size for h in all_hexes) / len(all_hexes)
+    centers = [sum(c) / len(c) for c in _cluster_1d([h.cx for h in all_hexes], avg_ring_size * 0.6)]
+    stack_of: Dict[int, int] = {}
+    for h in all_hexes:
+        nearest = min(range(len(centers)), key=lambda i: abs(centers[i] - h.cx))
+        stack_of[h.id] = nearest
+    return stack_of, len(centers)
+
+
+def _extract_armchair_capped_monomers(
+    original_mol,
+    window_hexes: List[BenzeneHex],
+    window_stacks: set,
+    atom_to_stacks: Dict[int, set],
+) -> List[Chem.Mol]:
+    """armchair 周期单元封端：在跨周期边界（左/右堆外）的 biaryl 断键上各封一个 Br。
+
+    每个断键都封端，封什么由其外部邻居方向决定：
+      - 周期方向（外部邻居堆在窗口左/右之外）→ Br，左右各取一个组合配对；
+      - 固定边（外部邻居在窗口堆范围内，指向上/下边界外）→ 甲基(C)。
+    armchair 竖直 fused 堆上下端通常是完整环边、带 H（无固定边断键），此时
+    0 甲基，合法。保留能 SanitizeMol 的产物。
+    """
+    monomer_atoms = set(aid for h in window_hexes for aid in h.atom_indices)
+    if not monomer_atoms:
+        return []
+
+    base_rw_mol = Chem.RWMol()
+    old_to_new_map = {}
+    sorted_old_indices = sorted(monomer_atoms)
+    for old_idx in sorted_old_indices:
+        atom = original_mol.GetAtomWithIdx(old_idx)
+        new_idx = base_rw_mol.AddAtom(Chem.Atom(atom.GetSymbol()))
+        base_rw_mol.GetAtomWithIdx(new_idx).SetFormalCharge(atom.GetFormalCharge())
+        old_to_new_map[old_idx] = new_idx
+    for old_idx in sorted_old_indices:
+        orig_atom = original_mol.GetAtomWithIdx(old_idx)
+        for neighbor in orig_atom.GetNeighbors():
+            n_idx = neighbor.GetIdx()
+            if n_idx in monomer_atoms and n_idx > old_idx:
+                bond = original_mol.GetBondBetweenAtoms(old_idx, n_idx)
+                if bond:
+                    base_rw_mol.AddBond(old_to_new_map[old_idx], old_to_new_map[n_idx], bond.GetBondType())
+
+    min_stack = min(window_stacks)
+    max_stack = max(window_stacks)
+    left_bonds: List[int] = []
+    right_bonds: List[int] = []
+    fixed_edge_bonds: List[int] = []
+    for u in sorted_old_indices:
+        for neighbor in original_mol.GetAtomWithIdx(u).GetNeighbors():
+            n_idx = neighbor.GetIdx()
+            if n_idx in monomer_atoms:
+                continue
+            neighbor_stacks = atom_to_stacks.get(n_idx, set())
+            if not neighbor_stacks:
+                continue
+            if max(neighbor_stacks) < min_stack:
+                left_bonds.append(u)        # 周期方向（左）→ Br
+            elif min(neighbor_stacks) > max_stack:
+                right_bonds.append(u)       # 周期方向（右）→ Br
+            else:
+                fixed_edge_bonds.append(u)  # 固定边（上/下）→ 甲基/H
+
+    if not left_bonds or not right_bonds:
+        return []
+
+    # 固定边断键：每个都封一个甲基（C）。armchair 竖直 fused 堆上下端通常为
+    # 完整环边、无固定边断键（fixed_edge_bonds 为空）→ 0 甲基，合法。
+    conf = original_mol.GetConformer()
+    fixed_edge_bonds = sorted(fixed_edge_bonds, key=lambda u: conf.GetAtomPosition(u).x)
+
+    capped_mols = []
+    for left in left_bonds:
+        for right in right_bonds:
+            rw_mol = Chem.RWMol(base_rw_mol)
+            for u in (left, right):
+                cap = rw_mol.AddAtom(Chem.Atom("Br"))
+                rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
+            for u in fixed_edge_bonds:
+                cap = rw_mol.AddAtom(Chem.Atom("C"))
+                rw_mol.AddBond(old_to_new_map[u], cap, Chem.BondType.SINGLE)
+            try:
+                Chem.SanitizeMol(rw_mol)
+                capped_mols.append(rw_mol.GetMol())
+            except Exception:
+                pass
+    return capped_mols
+
+
+def _generate_armchair_monomers(
+    original_mol,
+    all_hexes: List[BenzeneHex],
+    raw_smi_filename: str,
+    capped_smi_filename: str,
+    img_filename: str,
+) -> MonomerGenerationResult:
+    """armchair 专用周期单元生成：基于竖直堆窗口，周期方向封 Br。
+
+    窗口宽度 = 周期堆数 + 1（实测：捕获完整一个周期 + 衔接 biaryl 单键所需）。
+    与 zigzag 路径完全隔离，不共用窗口/封端逻辑。
+    """
+    result = MonomerGenerationResult()
+
+    stack_of, num_stacks = _assign_vertical_stacks(all_hexes)
+    if num_stacks == 0:
+        result.failure_reason = "armchair: no vertical stacks detected"
+        return result
+
+    heights = _vertical_stack_heights(all_hexes)
+    period_stacks = _minimal_sequence_period(heights)
+    window_width = period_stacks + 1
+    if window_width > num_stacks:
+        result.failure_reason = "armchair: ribbon too short for one periodic window"
+        return result
+
+    atom_to_stacks: Dict[int, set] = {}
+    for h in all_hexes:
+        for aid in h.atom_indices:
+            atom_to_stacks.setdefault(aid, set()).add(stack_of[h.id])
+
+    raw_results = []
+    unique_raw_smiles = set()
+    capped_results = []
+    unique_capped_smiles = set()
+
+    for start_stack in range(num_stacks - window_width + 1):
+        window_stacks = set(range(start_stack, start_stack + window_width))
+        window_hexes = [h for h in all_hexes if stack_of[h.id] in window_stacks]
+        if not window_hexes:
+            continue
+
+        raw_mol_rw = extract_submol_from_hexes(original_mol, window_hexes)
+        if raw_mol_rw:
+            frags = Chem.GetMolFrags(raw_mol_rw.GetMol(), asMols=True, sanitizeFrags=False)
+            if frags:
+                best_raw_mol = max(frags, key=lambda m: m.GetNumAtoms())
+                try:
+                    Chem.SanitizeMol(best_raw_mol)
+                    smi = Chem.MolToSmiles(best_raw_mol)
+                    if smi not in unique_raw_smiles:
+                        unique_raw_smiles.add(smi)
+                        raw_results.append(best_raw_mol)
+                except Exception:
+                    pass
+
+        capped_mols = _extract_armchair_capped_monomers(
+            original_mol, window_hexes, window_stacks, atom_to_stacks
+        )
+        for capped_mol in capped_mols:
+            frags = Chem.GetMolFrags(capped_mol, asMols=True, sanitizeFrags=True)
+            if not frags:
+                continue
+            best = max(frags, key=lambda m: m.GetNumAtoms())
+            if best.GetNumAtoms() != capped_mol.GetNumAtoms():
+                continue  # 必须是连通单分子
+            if not _accept_capped_monomer(best, "armchair"):
+                continue
+            smi = Chem.MolToSmiles(best)
+            if smi in unique_capped_smiles:
+                continue
+            unique_capped_smiles.add(smi)
+            capped_results.append(best)
+
+    if not raw_results:
+        result.failure_reason = "armchair: no valid raw monomer smiles generated"
+        return result
+    if not capped_results:
+        result.failure_reason = "armchair: no valid capped monomer smiles generated"
+        return result
+
+    _write_monomer_outputs(
+        result, raw_results, capped_results,
+        raw_smi_filename, capped_smi_filename, img_filename,
+    )
+    return result
+
+
+def _write_monomer_outputs(
+    result: MonomerGenerationResult,
+    raw_results: List[Chem.Mol],
+    capped_results: List[Chem.Mol],
+    raw_smi_filename: str,
+    capped_smi_filename: str,
+    img_filename: str,
+) -> None:
+    """把 raw / capped 产物写盘（与 zigzag 末段写盘逻辑等价，供两分支共用）。"""
+    for idx, mol in enumerate(raw_results):
+        smi = Chem.MolToSmiles(mol)
+        out_name = raw_smi_filename if len(raw_results) == 1 else raw_smi_filename.replace(".smi", f"_{idx+1}.smi")
+        try:
+            with open(out_name, 'w') as f:
+                f.write(smi)
+            result.raw_smiles.append(smi)
+            result.raw_files.append(out_name)
+            print(f"    [成功] 原始骨架保存: {os.path.basename(out_name)}")
+        except Exception as exc:
+            result.failure_reason = f"failed to write raw smiles: {exc}"
+            return
+
+    for idx, mol in enumerate(capped_results):
+        smi = Chem.MolToSmiles(mol)
+        if len(capped_results) == 1:
+            out_smi_name = capped_smi_filename
+            out_img_name = img_filename
+        else:
+            smi_p = Path(capped_smi_filename)
+            out_smi_name = str(smi_p.parent / f"{smi_p.stem}_{idx+1}{smi_p.suffix}")
+            img_p = Path(img_filename)
+            out_img_name = str(img_p.parent / f"{img_p.stem}_{idx+1}{img_p.suffix}")
+        try:
+            with open(out_smi_name, 'w') as f:
+                f.write(smi)
+            AllChem.Compute2DCoords(mol)
+            Draw.MolToFile(mol, out_img_name, size=(600, 600))
+            result.capped_smiles.append(smi)
+            result.capped_files.append(out_smi_name)
+            result.monomer_images.append(out_img_name)
+            print(f"    [成功] 智能封端保存: {os.path.basename(out_smi_name)} | 图像: {os.path.basename(out_img_name)}")
+        except Exception as exc:
+            result.failure_reason = f"failed to write capped smiles or image: {exc}"
+            return
+
+    result.is_valid = bool(result.raw_smiles and result.capped_smiles)
+    if not result.is_valid:
+        result.failure_reason = "monomer output files were incomplete"
+
+
 def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
                                      global_cutting_plan: Dict[int, List[Tuple[int, int]]] | GlobalCutPlan,
                                      k: int, max_col: int,
-                                     raw_smi_filename: str, capped_smi_filename: str, img_filename: str) -> MonomerGenerationResult:
+                                     raw_smi_filename: str, capped_smi_filename: str, img_filename: str,
+                                     edge_type: str = "zigzag") -> MonomerGenerationResult:
+    # armchair：竖直堆错开半周期，grid-col 窗口无法 kekulize，走专用周期单元路径。
+    # zigzag（默认）：保持与原实现逐字节等价的代码路径。
+    if edge_type == "armchair":
+        return _generate_armchair_monomers(
+            original_mol, all_hexes,
+            raw_smi_filename, capped_smi_filename, img_filename,
+        )
+
     result = MonomerGenerationResult()
     top_exit_direction = ""
     cutting_edges = global_cutting_plan
@@ -513,8 +779,7 @@ def generate_monomer_smiles_periodic(original_mol, all_hexes: List[BenzeneHex],
 
     capped_results = [
         mol for mol in capped_results
-        if _count_atoms_by_symbol(mol, "Br") == 2
-        and _count_terminal_aliphatic_carbons(mol) == 2
+        if _accept_capped_monomer(mol, "zigzag")
     ]
     if not capped_results:
         result.failure_reason = "no dibrominated dimethyl capped monomer smiles generated"

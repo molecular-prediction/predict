@@ -2,6 +2,7 @@ import os
 import re
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -9,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 from gnr_graph import (
     apply_path_to_all_tiles,
     build_edges_and_adj_geometric,
+    classify_edge_type,
     infer_minimal_period_cols,
     mol_to_hex_grid,
     partition_into_tiles,
@@ -211,31 +213,15 @@ def _collect_outputs_since(start_ts: float) -> List[OutputArtifact]:
 
 
 def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAILLMProvider]) -> None:
-    for artifact in artifacts:
-        logger.info(
-            "Start judging artifact: base_name=%s k=%s variant=%s capped_count=%s",
-            artifact.base_name,
-            artifact.k,
-            artifact.variant,
-            len(artifact.capped_smile_files),
-        )
-        judgements: List[SmileJudgement] = []
-        for index, smile_file in enumerate(artifact.capped_smile_files, start=1):
-            smile = _read_smiles_from_file(Path(smile_file))
-            if not smile:
-                logger.warning(
-                    "Skip empty SMILES file: artifact=%s file=%s",
-                    artifact.base_name,
-                    smile_file,
-                )
-                continue
-            if provider is None:
-                logger.warning(
-                    "LLM provider unavailable, skipping judgement: artifact=%s index=%s smiles=%s",
-                    artifact.base_name,
-                    index,
-                    smile,
-                )
+    """并行调用 LLM 评判所有 artifact 的 capped SMILES（并发上限 100）。"""
+    if provider is None:
+        # 无 provider 时直接标记所有为 disabled，不需要并行
+        for artifact in artifacts:
+            judgements = []
+            for smile_file in artifact.capped_smile_files:
+                smile = _read_smiles_from_file(Path(smile_file))
+                if not smile:
+                    continue
                 judgements.append(
                     SmileJudgement(
                         smile=smile,
@@ -245,39 +231,59 @@ def _judge_artifacts(artifacts: List[OutputArtifact], provider: Optional[OpenAIL
                         error="OpenAI provider unavailable",
                     )
                 )
+            artifact.smile_judgements = judgements
+        return
+
+    # 收集所有需要评判的任务：(artifact_index, smile_index, smile_str)
+    tasks = []
+    for art_idx, artifact in enumerate(artifacts):
+        for smi_idx, smile_file in enumerate(artifact.capped_smile_files):
+            smile = _read_smiles_from_file(Path(smile_file))
+            if not smile:
                 continue
-            try:
-                logger.info(
-                    "Judging SMILES: artifact=%s index=%s smiles=%s",
-                    artifact.base_name,
-                    index,
-                    smile,
-                )
-                result = provider.judge_smiles(smile)
-                logger.info(
-                    "Judgement done: artifact=%s index=%s model=%s status=%s",
-                    artifact.base_name,
-                    index,
-                    result.model,
-                    result.status,
-                )
-                judgements.append(result)
-            except Exception as exc:
-                logger.exception(
-                    "Judgement failed: artifact=%s index=%s smiles=%s",
-                    artifact.base_name,
-                    index,
-                    smile,
-                )
-                judgements.append(
-                    SmileJudgement(
-                        smile=smile,
-                        judgment="",
-                        model=provider.model,
-                        status="error",
-                        error=str(exc),
-                    )
-                )
+            tasks.append((art_idx, smi_idx, smile))
+
+    max_workers = int(os.getenv("LLM_JUDGE_MAX_WORKERS", "10"))
+    max_workers = max(1, min(max_workers, len(tasks) or 1))
+    logger.info(
+        "LLM judging: %d SMILES across %d artifacts, max_workers=%d",
+        len(tasks),
+        len(artifacts),
+        max_workers,
+    )
+
+    # 预分配结果槽
+    results_map: Dict[Tuple[int, int], SmileJudgement] = {}
+
+    def _judge_one(art_idx: int, smi_idx: int, smile: str) -> Tuple[int, int, SmileJudgement]:
+        try:
+            result = provider.judge_smiles(smile)
+            return (art_idx, smi_idx, result)
+        except Exception as exc:
+            logger.exception("Judgement failed: smile=%s", smile)
+            return (art_idx, smi_idx, SmileJudgement(
+                smile=smile,
+                judgment="",
+                model=provider.model,
+                status="error",
+                error=str(exc),
+            ))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_judge_one, art_idx, smi_idx, smile): (art_idx, smi_idx)
+            for art_idx, smi_idx, smile in tasks
+        }
+        for future in as_completed(futures):
+            art_idx, smi_idx, judgement = future.result()
+            results_map[(art_idx, smi_idx)] = judgement
+
+    # 按原始顺序回填结果
+    for art_idx, artifact in enumerate(artifacts):
+        judgements = []
+        for smi_idx in range(len(artifact.capped_smile_files)):
+            if (art_idx, smi_idx) in results_map:
+                judgements.append(results_map[(art_idx, smi_idx)])
         artifact.smile_judgements = judgements
         logger.info(
             "Finished judging artifact: base_name=%s success_count=%s",
@@ -312,19 +318,31 @@ def run_generation_pipeline(
     mol = read_smiles_and_generate_coords(input_file)
     hexes, total_width = mol_to_hex_grid(mol)
     minimal_period_cols = infer_minimal_period_cols(hexes, total_width)
+    edge_type = classify_edge_type(hexes, mol)
     _edges, all_adj = build_edges_and_adj_geometric(hexes)
 
     found_any_global = False
     seen_product_signatures = set()
     max_k = total_width if max_k_attempts is None else min(max_k_attempts, total_width)
+    # armchair 的周期单元生成（_generate_armchair_monomers）只依赖竖直堆窗口、
+    # 不依赖 k；若沿用 zigzag 的 k=1..max_k 全扫描，会把同一批产物在每个 k 下重复
+    # 落盘一份（去重签名含 k 拦不住）。armchair 仅在真实堆周期对应的单一 k 产出，
+    # 使 cut_method_k*_v* 的 k 语义与 §2 竖直堆周期一致。zigzag 行为一字不变。
+    if edge_type == "armchair":
+        armchair_k = max(1, min(minimal_period_cols, max_k))
+        k_values = [armchair_k]
+    else:
+        k_values = list(range(1, max_k + 1))
     logger.info(
-        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s",
+        "Detected ribbon period: total_width=%s minimal_period_cols=%s max_k=%s edge_type=%s k_values=%s",
         total_width,
         minimal_period_cols,
         max_k,
+        edge_type,
+        k_values,
     )
 
-    for k in range(1, max_k + 1):
+    for k in k_values:
         tiles = partition_into_tiles(hexes, k_cols=k)
         if not tiles:
             continue
@@ -392,6 +410,7 @@ def run_generation_pipeline(
                     str(raw_smi_path),
                     str(capped_smi_path),
                     str(monomer_img_path),
+                    edge_type=edge_type,
                 )
                 if not monomer_result.is_valid:
                     logger.info(
